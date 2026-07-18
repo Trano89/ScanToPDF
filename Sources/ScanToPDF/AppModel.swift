@@ -232,6 +232,12 @@ final class AppModel: ObservableObject {
         configStore.save(config)
     }
 
+    // Vérification manuelle immédiate des releases GitHub.
+    func checkRemoteUpdates() {
+        updateService.checkRemoteUpdates()
+        status = "Vérification des MAJ…."
+    }
+
     // MARK: - phrase secrète du cluster (durcissement optionnel de la MAJ réseau)
     var clusterPassphrase: String { ClusterSecret.load() ?? "" }
     func setClusterPassphrase(_ s: String) {

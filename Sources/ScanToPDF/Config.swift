@@ -90,6 +90,10 @@ struct AppConfig: Codable {
 enum AppVersion {
     static var build: Int { Int(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "0") ?? 0 }
     static var short: String { Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?" }
+    // Révision git compilée dans le binaire (via -DAPP_GIT_COUNT / -DAPP_GIT_SHA dans build_app.sh).
+    static var gitCount: Int { Int(_gitCount) ?? 0 }
+    static var gitSha: String { _gitSha.isEmpty ? "?" : _gitSha }
+    static var revision: String { "\(_gitCount):\(_gitSha.isEmpty ? "?" : _gitSha)" }
 }
 
 // Emplacements runtime. Base PARTAGÉE /Users/Shared/ScanToPDF (accessible à tous les comptes du Mac),

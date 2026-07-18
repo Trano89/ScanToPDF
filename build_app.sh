@@ -16,8 +16,14 @@ BUNDLE_ID="com.antonin.scantopdf"
 VERSION="1.0"
 # Numéro de build COURT et monotone : minutes écoulées depuis 2026-01-01 UTC (≈ 6 chiffres, ex. 266401).
 # Croissant dans le temps → comparable entre Mac pour la mise à jour réseau. (1767225600 = 2026-01-01 00:00 UTC)
+# Build number : minutes écoulées depuis 2026-01-01 UTC (≈ 6 chiffres, ex. 266401).
+# Croissant dans le temps → comparable entre Mac pour la mise à jour réseau. (1767225600 = 2026-01-01 00:00 UTC)
 BUILD=$(( ( $(date +%s) - 1767225600 ) / 60 ))
 [ "$BUILD" -ge 1 ] 2>/dev/null || BUILD=1     # garde-fou si l'horloge est antérieure à l'époque
+
+# Révision git (sha court + commit count) compilée dans le binaire via -D.
+GIT_REV=$(git rev-parse --short HEAD 2>/dev/null || echo "none")
+GIT_COUNT=$(git rev-list --count HEAD 2>/dev/null || echo "0")
 OUT_DIR="${1:-/Applications}"
 APP="$OUT_DIR/$APP_NAME.app"
 RES="$APP/Contents/MacOS/../Resources"      # = Contents/Resources
@@ -38,8 +44,12 @@ need dylibbundler dylibbundler
 
 # ── 1) Compilation Swift ─────────────────────────────────────────────────────
 echo "→ [1/8] Compilation Swift (release, arm64)…"
-swift build -c release --arch arm64
-BIN="$(swift build -c release --arch arm64 --show-bin-path)/$APP_NAME"
+BUILD_ARGS=(
+  -Xswiftc -D -Xswiftc "APP_GIT_COUNT=$GIT_COUNT"
+  -Xswiftc -D -Xswiftc "APP_GIT_SHA='$GIT_REV'"
+)
+swift build -c release --arch arm64 "${BUILD_ARGS[@]}"
+BIN="$(swift build -c release --arch arm64 "${BUILD_ARGS[@]}" --show-bin-path)/$APP_NAME"
 [ -f "$BIN" ] || { echo "❌ Binaire introuvable : $BIN"; exit 1; }
 
 # ── 2) Squelette du bundle ───────────────────────────────────────────────────

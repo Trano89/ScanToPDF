@@ -75,6 +75,12 @@ final class UpdateService {
         queue.async { self.updateTarget = nil }
     }
 
+    // Déclenche une vérification manuelle immédiate des releases GitHub.
+    func checkRemoteUpdates() {
+        remoteCheckTask?.cancel(); remoteCheckTask = nil   // annule le timer 24h pour éviter un doublon imminent
+        Task.detached { [weak self] in await self?.checkGitHubReleases() }
+    }
+
     // Active/désactive uniquement la vérification distante GitHub.
     // Utile quand networkEnabled passe de false → true (le service est redémarré, mais on veut garder le remote check activé par défaut).
     func setRemoteUpdates(_ enabled: Bool) {

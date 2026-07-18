@@ -190,10 +190,19 @@ struct SettingsView: View {
             .formStyle(.grouped)
 
             Divider()
-            HStack {
-                Text("ScanToPDF v\(AppVersion.short) (build \(AppVersion.build))")
-                    .font(.caption).foregroundStyle(.secondary)
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("ScanToPDF v\(AppVersion.short) (build \(AppVersion.build))")
+                        .font(.caption).foregroundStyle(.secondary)
+                    if AppVersion.gitCount > 0 {
+                        Text("revision \(AppVersion.revision)")
+                            .font(.caption2).foregroundStyle(.tertiary)
+                    }
+                }
                 Spacer()
+                Button("Vérifier les MAJ…") { model.checkRemoteUpdates() }
+                    .buttonStyle(.borderless)
+                    .font(.caption)
                 if !model.status.isEmpty {
                     Text(model.status).font(.caption).foregroundStyle(.secondary)
                         .lineLimit(1).truncationMode(.middle)
