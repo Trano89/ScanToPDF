@@ -1,16 +1,16 @@
 # ScanToPDF
 
-A macOS application that automatically watches a folder for scanned images, groups pages by project, and assembles them into searchable PDFs with OCR.
+A macOS app that automatically watches a folder for scanned images, groups pages by document batch, and assembles them into searchable PDFs with OCR.
 
 ## Purpose
 
-ScanToPDF streamlines the workflow of scanning large batches of documents. Instead of manually assembling each scanned page into a PDF, it monitors a designated **watch folder** — where your scanner or copier outputs files — and automatically:
+ScanToPDF automates the processing of bulk document scans. Instead of manually assembling each scanned page into a PDF, it monitors a designated **watch folder** — where your scanner or copier outputs files — and automatically:
 
 1. Detects new images dropped into the watch folder
 2. Groups pages belonging to the same document batch (by filename pattern)
 3. Assembles them in order into a single multi-page PDF
 4. Runs OCR (Optical Character Recognition) to make the text searchable
-5. Applies image corrections and optimizations
+5. Applies image corrections and compression
 
 ## Features
 
@@ -22,8 +22,35 @@ ScanToPDF streamlines the workflow of scanning large batches of documents. Inste
 - **PDF/A** — Exports in the archival PDF/A format for long-term preservation
 - **Watermarking** (optional) — Applies a diagonal or custom watermark to pages
 - **Network Export** (optional) — Can copy finished PDFs to a NAS or shared network drive
+- **Multi-Mac Sync** — Optional over-the-air app updates across Macs on the same local network
+
+## Releases
+
+Pre-compiled releases are available on the [Releases page](https://github.com/Trano89/ScanToPDF/releases) :
+
+- `.dmg` — Disk image for drag-and-drop installation
+- `.zip` — Source code archive (for manual inspection or alternative builds)
+
+### App Auto-Update
+
+ScanToPDF includes two built-in update mechanisms:
+
+1. **GitHub Release Check** — The app queries the GitHub API every 24 hours for newer release versions. A banner appears in Settings with a link to the latest release.
+2. **Local Network Sync** — When enabled, Macs running ScanToPDF on the same local network can discover each other via mDNS/Bonjour and push updates between themselves using TLS-PSK encryption.
+
+You can toggle both behaviors in the Preferences pane → Application section.
 
 ## Installation
+
+### Prerequisites
+
+The following dependencies are bundled inside the `.app` bundle. No external installation is needed:
+
+- **Python 3** (bundled) — powers the workflow engine
+- **Tesseract OCR** — text recognition
+- **ocrmypdf** — OCR, PDF/A conversion, optimization
+- **Ghostscript** — PDF compression and PDF/A rendering
+- **ImageMagick / Pillow** — image corrections and assembly
 
 ### Quick Install
 
@@ -32,26 +59,25 @@ ScanToPDF streamlines the workflow of scanning large batches of documents. Inste
 3. Drag `ScanToPDF.app` into your `/Applications` folder
 4. Launch the app — it will start in the menu bar
 
-All dependencies (Python 3, Tesseract OCR, ocrmypdf, Ghostscript, Pillow) are bundled inside the `.app`. No external installation is needed.
-
 ### From Source (Development)
 
 ```bash
+# Clone the repository
 git clone https://github.com/Trano89/ScanToPDF.git
 cd ScanToPDF
 
-# Build the app bundle (bundles Python, Tesseract, Ghostscript, etc.)
+# Build the app bundle
 ./build_app.sh
 
 # Install to /Applications
 sudo mv build/ScanToPDF.app /Applications/
 ```
 
-The app requires **macOS 13+** and an Apple Silicon Mac. The `build_app.sh` script builds the Xcode project and bundles all native dependencies (Python, Tesseract, Ghostscript, ocrmypdf) inside `Contents/Resources/`.
+The app requires **macOS 13+** and an Apple Silicon Mac. The bundled Python runtime and all native dependencies (Tesseract, Ghostscript, ocrmypdf) are included automatically by `build_app.sh`.
 
 ## Configuration
 
-The app is configured through a `config.json` file in the application directory:
+The app is configured through a `config.json` file stored in `/Users/Shared/ScanToPDF/config.json` (accessible from the preferences pane):
 
 ```json
 {
@@ -115,20 +141,6 @@ The app is configured through a `config.json` file in the application directory:
 | `pageSeparator` | Character separating project ID from pagination number (e.g., `_` in `Doc_29-1.tif`) | `"_"` |
 | `pageDelimiter` | Character separating page number within a batch (e.g., `-` in `Doc_29-1.tif`) | `"-"` |
 
-## Customizing File Grouping
-
-You can configure how files are grouped into document batches using the **Preferences** pane → **Regroupement des fichiers** section, or directly via `config.json`:
-
-- **Separateur identifiant-projet** (`pageSeparator`): the character between the project identifier and the pagination number (default: `_`). For `Eg.w.O0.1901_29`, this is `_`. Use `-` if your identifiers already contain underscores.
-- **Séparateur pagination** (`pageDelimiter`): the character between the document number and individual page numbers within a batch (default: `-`). For `Eg.w.O0.1901_29-1`, this is `-`.
-
-Example — renaming your files to use dots instead of underscores:
-```
-Doc.1.1.tif   → project "Doc", pagination "1", page 1
-Doc.1.2.tif   → project "Doc", pagination "1", page 2
-```
-Set `pageSeparator` = `.` and `pageDelimiter` = `.` (or a different character for each role).
-
 ## How It Works
 
 ### 1. Scan or copy files to the watch folder
@@ -151,21 +163,51 @@ Finished PDFs are saved alongside the original scan images (controlled by `keepO
 
 ### Logs
 
-All processing activity is logged in the `logs/` directory:
+All processing activity is logged in `/Users/Shared/ScanToPDF/logs/`:
 - `watcher_*.log` — Detection and grouping events
 - `archivage_*.log` — PDF assembly and OCR results
 
+## Customizing File Grouping
+
+You can configure how files are grouped into document batches using the **Preferences** pane → **Regroupement des fichiers** section, or directly via `config.json`:
+
+- **Separateur identifiant-projet** (`pageSeparator`): the character between the project identifier and the pagination number (default: `_`). For `Eg.w.O0.1901_29`, this is `_`. Use `-` if your identifiers already contain underscores.
+- **Séparateur pagination** (`pageDelimiter`): the character between the document number and individual page numbers within a batch (default: `-`). For `Eg.w.O0.1901_29-1`, this is `-`.
+
+Example — renaming your files to use dots instead of underscores:
+```
+Doc.1.1.tif   → project "Doc", pagination "1", page 1
+Doc.1.2.tif   → project "Doc", pagination "1", page 2
+```
+Set `pageSeparator` = `.` and `pageDelimiter` = `.` (or a different character for each role).
+
 ## Dependencies
 
-All dependencies are **bundled inside the `.app`** — no external installation is needed:
+All dependencies are bundled inside `ScanToPDF.app/Contents/Resources/`:
 
-- **Python 3** (bundled) — workflow engine
-- **Tesseract OCR** — text recognition (`Contents/Resources/share/tessdata/`)
-- **ocrmypdf** — OCR + PDF/A conversion (`Contents/Resources/python/`)
-- **Ghostscript** — PDF compression and PDF/A rendering (`Contents/Resources/bin/gs`)
-- **Pillow / Pillow-SIMD** — image processing (`Contents/Resources/python/lib/`)
+- **Python 3** — workflow engine
+- **Tesseract OCR** — text recognition (`share/tessdata`)
+- **ocrmypdf** — OCR + PDF/A conversion
+- **Ghostscript** — PDF compression and PDF/A rendering (`bin/gs`, `gs-lib`)
+- **Pillow / Pillow-SIMD** — image processing
 
-The app requires **macOS 13+** and an Apple Silicon Mac.
+No external dependencies are needed. The app is fully self-contained.
+
+## Architecture
+
+```
+ScanToPDF.app/
+├── Contents/MacOS/ScanToPDF          # Swift binary (AppKit/SwiftUI)
+├── Contents/Resources/
+│   ├── python/                        # Bundled Python 3 runtime
+│   ├── bin/gs                         # Ghostscript binary
+│   ├── gs-lib/                        # Ghostscript resources
+│   ├── share/tessdata/                # Tesseract trained data
+│   └── engine/
+│       ├── archivage_watcher.py       # File watcher + queue (watchdog)
+│       └── archivage_workflow.py      # TIFF → PDF pipeline
+└── Info.plist
+```
 
 ## License
 
