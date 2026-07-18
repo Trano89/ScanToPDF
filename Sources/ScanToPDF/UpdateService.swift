@@ -8,17 +8,26 @@ import CryptoKit
 // (aucune synchro d'index). Chaque Mac annonce son numéro de build ; s'il en existe un plus récent
 // sur le réseau, on prévient l'app (invitation), et sur action de l'utilisateur on télécharge le
 // bundle .app du pair (chiffré TLS-PSK), on le vérifie (SHA-256 + signature) puis on le remplace.
+// URLs pour les releases GitHub (source des MAU distantes).
+private enum GitHubRelease {
+    static let apiURL = "https://api.github.com/repos/Trano89/ScanToPDF/releases/latest"
+    // Format attendu d'un tag : vMAJOR.MINOR.BUILD_NUMBER (ex. v1.0.285658).
+    static let tagRe = "^v[0-9]+\\.[0-9]+\\.(\\d+)$"
+}
+
 final class UpdateService {
     static let serviceType = "_scantopdf._tcp"
     static let appSecret = "scantopdf-lan-v1"   // clé partagée du cluster ScanToPDF (base de la clé TLS-PSK)
 
     private let nodeId: String
     private let onUpdateAvailable: (Int, String) -> Void
+    private let onRemoteUpdateAvailable: (Int) -> Void   // callback distinct pour les releases GitHub
 
     private let queue = DispatchQueue(label: "scantopdf.update")
     private var listener: NWListener?
     private var browser: NWBrowser?
     private var refreshTask: Task<Void, Never>?
+    private var remoteCheckTask: Task<Void, Never>?   // vérification périodique des releases GitHub
 
     private struct UpdateTarget { let endpoint: NWEndpoint; let build: Int }
     private var updateTarget: UpdateTarget?
@@ -36,9 +45,12 @@ final class UpdateService {
         var sha: String?   // SHA-256 (hex) de l'archive complète
     }
 
-    init(nodeId: String, onUpdateAvailable: @escaping (Int, String) -> Void) {
+    init(nodeId: String,
+         onUpdateAvailable: @escaping (Int, String) -> Void,
+         onRemoteUpdateAvailable: @escaping (Int) -> Void) {
         self.nodeId = nodeId
         self.onUpdateAvailable = onUpdateAvailable
+        self.onRemoteUpdateAvailable = onRemoteUpdateAvailable
     }
 
     func start() {
@@ -51,13 +63,31 @@ final class UpdateService {
                 self?.refreshAdvertisement()
             }
         }
+        // Remote check activé par défaut : peut être désactivé via setRemoteUpdates(false).
+        setRemoteUpdates(true)
     }
 
     func stop() {
         refreshTask?.cancel(); refreshTask = nil
+        remoteCheckTask?.cancel(); remoteCheckTask = nil
         listener?.cancel(); browser?.cancel()
         listener = nil; browser = nil
         queue.async { self.updateTarget = nil }
+    }
+
+    // Active/désactive uniquement la vérification distante GitHub.
+    // Utile quand networkEnabled passe de false → true (le service est redémarré, mais on veut garder le remote check activé par défaut).
+    func setRemoteUpdates(_ enabled: Bool) {
+        if enabled {
+            remoteCheckTask = Task { [weak self] in
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 86_400_000_000)   // 24 h
+                    await self?.checkGitHubReleases()
+                }
+            }
+        } else {
+            remoteCheckTask?.cancel(); remoteCheckTask = nil
+        }
     }
 
     // MARK: - TLS-PSK (clé pré-partagée)
@@ -170,6 +200,39 @@ final class UpdateService {
         if AppVersion.build > 0, let ep = bestEndpoint, bestBuild > AppVersion.build {
             updateTarget = UpdateTarget(endpoint: ep, build: bestBuild)   // (déjà sur la file du browser)
             onUpdateAvailable(bestBuild, bestName)
+        }
+    }
+
+    // MARK: - MAU distante : vérification des releases GitHub
+    // Parse les tags de release « vMAJOR.MINOR.BUILD » via l'API GitHub. Si un build plus récent est trouvé, on notifie l'app.
+    func checkGitHubReleases() async {
+        guard AppVersion.build > 0 else { return }   // hors .app → aucune MAU auto
+
+        do {
+            guard let url = URL(string: GitHubRelease.apiURL) else { return }
+            var req = URLRequest(url: url); req.timeoutInterval = 15
+            let (data, response) = try await URLSession.shared.data(for: req)
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else { return }
+
+            // Parse JSON : on cherche le tag de la release la plus récente.
+            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let tagName = json["tag_name"] as? String else { return }
+
+            // Extraire BUILD_NUMBER du tag « vMAJOR.MINOR.BUILD » via NSRegularExpression.
+            guard let regex = try? NSRegularExpression(pattern: GitHubRelease.tagRe),
+                  let match = regex.firstMatch(in: tagName, range: NSRange(tagName.startIndex..., in: tagName)),
+                  let buildRange = Range(match.range(at: 1), in: tagName),
+                  let remoteBuild = Int(tagName[buildRange]) else { return }
+
+            // Notifier si le build distant est strictement supérieur.
+            if remoteBuild > AppVersion.build {
+                queue.async { [weak self] in
+                    guard let self else { return }
+                    self.onRemoteUpdateAvailable(remoteBuild)
+                }
+            }
+        } catch {
+            // Silencieux : réseau temporairement indisponible n'est pas une erreur.
         }
     }
 

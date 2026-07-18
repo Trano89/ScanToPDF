@@ -148,7 +148,9 @@ struct SettingsView: View {
 
                 Section("Application") {
                     Toggle("Démarrer avec le système", isOn: toggle(\.startAtLogin))
-                    Toggle("Mises à jour entre Mac du réseau", isOn: toggle(\.networkEnabled))
+                    Toggle("Mises à jour entre Mac du réseau (Bonjour)", isOn: toggle(\.networkEnabled))
+                    Toggle("Vérification des releases GitHub", isOn: toggle(\.remoteUpdateEnabled))
+                    Text("Toutes les 24 h, l'app vérifie s'il existe une version plus récente sur GitHub.").font(.caption).foregroundStyle(.secondary)
                     if model.config.networkEnabled {
                         HStack {
                             SecureField("Phrase secrète (optionnelle)", text: $passphrase)
@@ -228,9 +230,19 @@ struct SettingsView: View {
             if model.updateInstalling {
                 Text("Mise à jour en cours…").font(.callout)
                 ProgressView().controlSize(.small)
+            } else if model.updateIsRemote {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Nouvelle version disponible sur GitHub").font(.callout)
+                    Text("Build \(model.updatePeerBuild) — consultez les releases pour télécharger.").font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Voir sur GitHub") { openGitHubRelease() }.buttonStyle(.borderedProminent)
+                Button("Plus tard") { model.dismissUpdate() }
             } else {
-                Text("Mise à jour disponible (« \(model.updatePeerName) »).")
-                    .font(.callout).lineLimit(2)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Mise à jour disponible (« \(model.updatePeerName) »).").font(.callout)
+                    Text("Build \(model.updatePeerBuild)").font(.caption).foregroundStyle(.secondary)
+                }
                 Spacer()
                 Button("Installer et redémarrer") { model.installUpdate() }.buttonStyle(.borderedProminent)
                 Button("Plus tard") { model.dismissUpdate() }
@@ -239,6 +251,12 @@ struct SettingsView: View {
         .padding(.horizontal, 14).padding(.vertical, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(.thinMaterial)
+    }
+
+    private func openGitHubRelease() {
+        if let url = URL(string: "https://github.com/Trano89/ScanToPDF/releases") {
+            NSWorkspace.shared.open(url)
+        }
     }
 
     private func chooseFolder() {

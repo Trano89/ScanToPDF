@@ -34,6 +34,7 @@ struct AppConfig: Codable {
     // Application :
     var startAtLogin: Bool = true    // démarrer avec le système (login item)
     var networkEnabled: Bool = true  // découverte réseau + invitation de mise à jour
+    var remoteUpdateEnabled: Bool = true  // vérification périodique des releases GitHub
     var dismissedUpdateBuild: Int = 0 // build refusé via « Plus tard » (ne plus reproposer)
     // Export du résultat vers le NAS (Synology). Le dossier projet est classé selon son nom
     // (« Eg.w.O0.… » → Eg/w/O0/) sur le NAS SMB monté (priorité), sinon dans le dossier Synology Drive.

@@ -14,7 +14,9 @@ final class AppModel: ObservableObject {
     @Published var updateAvailable = false
     @Published var updatePeerName = ""
     @Published var updateInstalling = false
-    private var updatePeerBuild = 0
+    var updatePeerBuild: Int = 0           // build de la source qui propose une MAU (LAN ou GitHub)
+    @Published var updateRemoteBuild = 0   // alias : même valeur, pour l'affichage dans SettingsView
+    @Published var updateIsRemote = false  // true si la MAU vient de GitHub (pas d'install auto)
     private var updateDismissedBuild = 0
     // Ancien automatisme (com.fvjc.archivage) détecté sur ce Mac → à supprimer (doublon).
     @Published var legacyDetected = false
@@ -35,14 +37,26 @@ final class AppModel: ObservableObject {
         engine.onLog = { [weak self] s in
             Task { @MainActor in self?.status = s }
         }
-        updateService = UpdateService(nodeId: configStore.nodeId()) { [weak self] build, name in
+        updateService = UpdateService(nodeId: configStore.nodeId(),
+                                      onUpdateAvailable: { [weak self] build, name in
             Task { @MainActor in
                 guard let self, build > AppVersion.build, build > self.updateDismissedBuild, !self.updateInstalling else { return }
                 self.updatePeerBuild = build
+                self.updateRemoteBuild = build
                 self.updatePeerName = name
                 self.updateAvailable = true
+                self.updateIsRemote = false
             }
-        }
+        }, onRemoteUpdateAvailable: { [weak self] build in
+            Task { @MainActor in
+                guard let self, build > AppVersion.build, build > self.updateDismissedBuild, !self.updateInstalling else { return }
+                self.updatePeerBuild = build
+                self.updateRemoteBuild = build
+                self.updatePeerName = "GitHub"
+                self.updateAvailable = true
+                self.updateIsRemote = true
+            }
+        })
     }
 
     // Démarrage effectif (appelé une fois depuis applicationDidFinishLaunching).
@@ -146,10 +160,12 @@ final class AppModel: ObservableObject {
         let folderChanged = c.watchFolder != config.watchFolder
         let netChanged = c.networkEnabled != config.networkEnabled
         let loginChanged = c.startAtLogin != config.startAtLogin
+        let remoteChanged = c.remoteUpdateEnabled != config.remoteUpdateEnabled
         config = c
         configStore.save(c)
         if loginChanged { applyLoginItem() }
         if netChanged { c.networkEnabled ? updateService.start() : updateService.stop() }
+        if remoteChanged { updateService.setRemoteUpdates(c.remoteUpdateEnabled) }
         if folderChanged { engine.restart(watchFolder: c.watchFolder) }
     }
 
