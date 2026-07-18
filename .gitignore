@@ -4,8 +4,30 @@ temp_processing/
 temp/
 archivage.lock
 
+# Build artifacts
+.build/
+build/
+*.xcworkspace/
+DerivedData/
+
+# IDE
+*.xcodeproj/
+*.pbxuser
+!default.pbxuser
+*.mode1v3
+!default.mode1v3
+*.perspectivev3
+!default.perspectivev3
+xcuserdata/
+*.sourcemap
+*.xccheckmarx*
+
 # macOS
 .DS_Store
+
+# Python
+*.pyc
+__pycache__/
 
 # Config (contains local paths/sensitive data)
 config.json
