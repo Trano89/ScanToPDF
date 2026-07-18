@@ -32,3 +32,8 @@ __pycache__/
 # Config (contains local paths/sensitive data)
 config.json
 node.id
+
+# Distribution artifacts (large binaries)
+*.dmg
+releases/
+~*/
