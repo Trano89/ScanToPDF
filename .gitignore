@@ -1,0 +1,12 @@
+# Runtime data
+logs/
+temp_processing/
+temp/
+archivage.lock
+
+# macOS
+.DS_Store
+
+# Config (contains local paths/sensitive data)
+config.json
+node.id
