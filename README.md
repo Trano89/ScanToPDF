@@ -23,6 +23,32 @@ ScanToPDF streamlines the workflow of scanning large batches of documents. Inste
 - **Watermarking** (optional) — Applies a diagonal or custom watermark to pages
 - **Network Export** (optional) — Can copy finished PDFs to a NAS or shared network drive
 
+## Installation
+
+### Quick Install
+
+1. Download the latest `.dmg` or `.tar.gz` from [Releases](https://github.com/Trano89/ScanToPDF/releases)
+2. Open the dmg or extract the archive
+3. Drag `ScanToPDF.app` into your `/Applications` folder
+4. Launch the app — it will start in the menu bar
+
+All dependencies (Python 3, Tesseract OCR, ocrmypdf, Ghostscript, Pillow) are bundled inside the `.app`. No external installation is needed.
+
+### From Source (Development)
+
+```bash
+git clone https://github.com/Trano89/ScanToPDF.git
+cd ScanToPDF
+
+# Build the app bundle (bundles Python, Tesseract, Ghostscript, etc.)
+./build_app.sh
+
+# Install to /Applications
+sudo mv build/ScanToPDF.app /Applications/
+```
+
+The app requires **macOS 13+** and an Apple Silicon Mac. The `build_app.sh` script builds the Xcode project and bundles all native dependencies (Python, Tesseract, Ghostscript, ocrmypdf) inside `Contents/Resources/`.
+
 ## Configuration
 
 The app is configured through a `config.json` file in the application directory:
@@ -53,7 +79,9 @@ The app is configured through a `config.json` file in the application directory:
   "nasUser": "",
   "exportEnabled": false,
   "notify": true,
-  "startAtLogin": false
+  "startAtLogin": false,
+  "pageSeparator": "_",
+  "pageDelimiter": "-"
 }
 ```
 
@@ -84,6 +112,22 @@ The app is configured through a `config.json` file in the application directory:
 | `exportEnabled` | Copy finished PDFs to the network location | `false` |
 | `notify` | Show macOS notifications for progress/events | `true` |
 | `startAtLogin` | Launch the app when macOS starts | `false` |
+| `pageSeparator` | Character separating project ID from pagination number (e.g., `_` in `Doc_29-1.tif`) | `"_"` |
+| `pageDelimiter` | Character separating page number within a batch (e.g., `-` in `Doc_29-1.tif`) | `"-"` |
+
+## Customizing File Grouping
+
+You can configure how files are grouped into document batches using the **Preferences** pane → **Regroupement des fichiers** section, or directly via `config.json`:
+
+- **Separateur identifiant-projet** (`pageSeparator`): the character between the project identifier and the pagination number (default: `_`). For `Eg.w.O0.1901_29`, this is `_`. Use `-` if your identifiers already contain underscores.
+- **Séparateur pagination** (`pageDelimiter`): the character between the document number and individual page numbers within a batch (default: `-`). For `Eg.w.O0.1901_29-1`, this is `-`.
+
+Example — renaming your files to use dots instead of underscores:
+```
+Doc.1.1.tif   → project "Doc", pagination "1", page 1
+Doc.1.2.tif   → project "Doc", pagination "1", page 2
+```
+Set `pageSeparator` = `.` and `pageDelimiter` = `.` (or a different character for each role).
 
 ## How It Works
 
@@ -113,11 +157,15 @@ All processing activity is logged in the `logs/` directory:
 
 ## Dependencies
 
-The app requires:
-- **macOS** — native integration for file watching and notifications
-- **Tesseract OCR** — for text recognition (installed via ocrmypdf)
-- **ocrmypdf** — handles OCR, PDF/A conversion, and optimization
-- **ImageMagick / PIL** — image corrections and assembly
+All dependencies are **bundled inside the `.app`** — no external installation is needed:
+
+- **Python 3** (bundled) — workflow engine
+- **Tesseract OCR** — text recognition (`Contents/Resources/share/tessdata/`)
+- **ocrmypdf** — OCR + PDF/A conversion (`Contents/Resources/python/`)
+- **Ghostscript** — PDF compression and PDF/A rendering (`Contents/Resources/bin/gs`)
+- **Pillow / Pillow-SIMD** — image processing (`Contents/Resources/python/lib/`)
+
+The app requires **macOS 13+** and an Apple Silicon Mac.
 
 ## License
 
