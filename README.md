@@ -66,14 +66,11 @@ The following dependencies are bundled inside the `.app` bundle. No external ins
 git clone https://github.com/Trano89/ScanToPDF.git
 cd ScanToPDF
 
-# Build the app bundle
+# Build and install directly to /Applications
 ./build_app.sh
-
-# Install to /Applications
-sudo mv build/ScanToPDF.app /Applications/
 ```
 
-The app requires **macOS 13+** and an Apple Silicon Mac. The bundled Python runtime and all native dependencies (Tesseract, Ghostscript, ocrmypdf) are included automatically by `build_app.sh`.
+The app requires **macOS 13+** and an Apple Silicon Mac. The `build_app.sh` script compiles the Swift source, bundles the Python runtime, and installs the final `ScanToPDF.app` directly into `/Applications/`. All native dependencies (Tesseract, Ghostscript, ocrmypdf) are included automatically.
 
 ## Configuration
 
