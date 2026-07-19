@@ -5,11 +5,10 @@ import Foundation
 // décocher une case ici change le comportement du pipeline sans recompiler.
 struct AppConfig: Codable {
     var watchFolder: String = "/Users/Shared/FVJC_SCAN"   // dossier surveillé
-    // Règle de regroupement des fichiers par projet / page :
-    // Les noms suivent le schéma : <projectIdentifier><separator><pageN>.tif( (ex. « Eg.w.O0.1901_29-1.tif »)
-    // — pageSeparator : caractère entre l'identifiant projet et le n° de pagination (ex. « _ » dans Doc_29-1.tif).
-    //     Le séparateur peut être un autre caractère (ex. « - ») si les identifiants contiennent déjà des tirets.
-    // — pageDelimiter : caractère entre le n° du document et le n° de page (ex. « - » dans Doc_29-1.tif).
+    // Règle de regroupement des fichiers par projet / page (configurée via menu dans les préférences) :
+    // Les noms suivent le schéma : <projectIdentifier><separator><pageN>.tif (ex. « Eg.w.O0.1901_29-1.tif »)
+    // — pageSeparator : caractère entre l'identifiant projet et le n° de pagination (menu : -, _, ., ~, :, espace)
+    // — pageDelimiter : caractère entre le n° du document et le n° de page au sein d'une série (ex. « - » dans Doc_29-1.tif)
     var pageSeparator: String = "_"   // sépare l'identifiant projet du n° de pagination (défaut : « _ »)
     var pageDelimiter: String = "-"   // sépare le n° du doc du n° de page au sein d'une série (défaut : « - »)
     // Étapes du pipeline (cases à cocher) :

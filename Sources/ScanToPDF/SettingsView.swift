@@ -1,14 +1,42 @@
 import SwiftUI
 import AppKit
 
+/// Caractères séparateurs courants utilisables dans le regroupement de fichiers.
+enum PageSeparator: String, Identifiable, CaseIterable {
+    case dash = "-"
+    case underscore = "_"
+    case dot = "."
+    case tilde = "~"
+    case colon = ":"
+    case space = " "
+
+    var id: String { rawValue }
+    var displayName: String {
+        switch self {
+        case .dash:   return "Tiret (-)"
+        case .underscore: return "Souligné (_)"
+        case .dot:  return "Point (.)"
+        case .tilde:    return "Tilde (~)"
+        case .colon:    return "Deux-points (:)"
+        case .space:    return "Espace (\u{2009})"
+        }
+    }
+}
+
 // Fenêtre de préférences : dossier surveillé + cases à cocher des étapes du pipeline + réglages app.
 struct SettingsView: View {
     @EnvironmentObject var model: AppModel
     @State private var folder: String = AppModel.shared.config.watchFolder
     @State private var passphrase: String = AppModel.shared.clusterPassphrase
     @State private var wmText: String = AppModel.shared.config.watermarkText
-    @State private var pageSepChar: String = AppModel.shared.config.pageSeparator
-    @State private var pageDelimChar: String = AppModel.shared.config.pageDelimiter
+    @State private var pageSepChar: PageSeparator = {
+        guard let found = PageSeparator.allCases.first(where: { $0.rawValue == AppModel.shared.config.pageSeparator }) else { return .underscore }
+        return found
+    }()
+    @State private var pageDelimChar: PageSeparator = {
+        guard let found = PageSeparator.allCases.first(where: { $0.rawValue == AppModel.shared.config.pageDelimiter }) else { return .dash }
+        return found
+    }()
     // Champs NAS (édition locale, appliqués via « Enregistrer »).
     @State private var nasHost: String = AppModel.shared.config.nasHost
     @State private var nasShare: String = AppModel.shared.config.nasShare
@@ -85,35 +113,29 @@ struct SettingsView: View {
                 }
 
                 Section("Regroupement des fichiers") {
-                    Text("Le moteur Python regroupe les TIFF par projet en lisant config.json. Ces caractères sont utilisés pour séparer l'identifiant du document du n° de page dans les noms de fichier (ex. « Eg.w.O0.1901_29-1.tif »).")
+                    Text("Le moteur Python regroupe les TIFF par projet en lisant config.json. Ces caractères servent à séparer l'identifiant du document du numéro de page dans les noms de fichier (ex. « Eg.w.O0.1901_29-1.tif »). Par exemple : Ab.c.DE.9999-1.tif, Ab.c.DE.9999-2.tif seront regroupés en un seul PDF.")
                         .font(.caption).foregroundStyle(.secondary)
                     VStack(alignment: .leading, spacing: 6) {
-                        HStack {
-                            TextField("Séparateur identifiant-projet", text: $pageSepChar)
-                                .textFieldStyle(.roundedBorder)
-                                .onChange(of: pageSepChar) { _, newVal in
-                                    if !newVal.isEmpty && !isValidSeparatorChar(newVal.first!) {
-                                        pageSepChar = ""
-                                    } else {
-                                        model.update { $0.pageSeparator = newVal }
-                                    }
-                                }
+                        Picker("Séparateur identifiant-projet", selection: Binding(
+                            get: { pageSepChar },
+                            set: { pageSepChar = $0; model.update { $0.pageSeparator = pageSepChar.rawValue } }
+                        )) {
+                            ForEach(PageSeparator.allCases) { sep in
+                                Text(sep.displayName).tag(sep)
+                            }
                         }
-                        Text("Caractère entre l'identifiant du document et le n° de pagination. Ex. « _ » dans Eg.w.O0.1901_29-1.tif, ou « - » si les identifiants contiennent déjà des tirets.")
-                            .font(.caption).foregroundStyle(.secondary)
-                        HStack {
-                            TextField("Séparateur pagination", text: $pageDelimChar)
-                                .textFieldStyle(.roundedBorder)
-                                .onChange(of: pageDelimChar) { _, newVal in
-                                    if !newVal.isEmpty && !isValidSeparatorChar(newVal.first!) {
-                                        pageDelimChar = ""
-                                    } else {
-                                        model.update { $0.pageDelimiter = newVal }
-                                    }
-                                }
+                        .padding(.leading, 18)
+                        Text("Caractère entre l'identifiant du document et le n° de pagination. Ex. « _ » dans Eg.w.O0.1901_29-1.tif").font(.caption).foregroundStyle(.secondary)
+                        Picker("Séparateur pagination", selection: Binding(
+                            get: { pageDelimChar },
+                            set: { pageDelimChar = $0; model.update { $0.pageDelimiter = pageDelimChar.rawValue } }
+                        )) {
+                            ForEach(PageSeparator.allCases) { sep in
+                                Text(sep.displayName).tag(sep)
+                            }
                         }
-                        Text("Caractère entre le n° du document et les n° de page au sein d'une série. Ex. « - » dans Eg.w.O0.1901_29-1.tif pour marquer la pagination.")
-                            .font(.caption).foregroundStyle(.secondary)
+                        .padding(.leading, 18)
+                        Text("Caractère entre le n° du document et le n° de page au sein d'une série. Ex. « - » dans Eg.w.O0.1901_29-1.tif pour séparer les pages Ab.c.DE.9999-1, 9999-2, etc.").font(.caption).foregroundStyle(.secondary)
                     }
                 }
 
@@ -212,8 +234,12 @@ struct SettingsView: View {
         }
         .frame(width: 460, height: 600)
         .onChange(of: model.config.watchFolder) { _, new in folder = new }
-        .onChange(of: model.config.pageSeparator) { _, new in pageSepChar = new }
-        .onChange(of: model.config.pageDelimiter) { _, new in pageDelimChar = new }
+        .onChange(of: model.config.pageSeparator) { _, new in
+            if let sep = PageSeparator(rawValue: new) { pageSepChar = sep }
+        }
+        .onChange(of: model.config.pageDelimiter) { _, new in
+            if let sep = PageSeparator(rawValue: new) { pageDelimChar = sep }
+        }
     }
 
     private var legacyBanner: some View {
@@ -302,9 +328,4 @@ struct SettingsView: View {
         }
     }
 
-    /// Caractères interdits comme séparateur : espaces, slash, guillemets, caractères Shell dangereux.
-    private func isValidSeparatorChar(_ ch: Character) -> Bool {
-        let forbidden: Set<Character> = [" ", "\t", "/", ":", ";", "'", "\"", "$", "`", "|", "&", ">", "<", "(", ")", "{", "}", "[", "]", "\n", "\r"]
-        return !forbidden.contains(ch)
-    }
 }
