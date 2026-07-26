@@ -680,16 +680,19 @@ def process_project(project_name: str, tiff_files: list, logger: logging.Logger)
         # finalize_pdf gère en un seul passage Ghostscript : compression @ DPI et/ou vrai PDF/A-2b.
         final_pdf   = finalize_pdf(staged, project_name, project_dir, logger)
 
-        # Suppression optionnelle des originaux (case « Conserver les originaux » décochée) :
-        # tout ce qui n'est PAS le résultat final (TIFF isolés, PDF sources paginés, « _original.pdf »).
+        # Suppression optionnelle : SEULS les TIFF intermédiaires (volumineux) sont supprimés quand la
+        # case « Conserver les TIFF originaux » est décochée. Les PDF SOURCES déposés par l'utilisateur ne
+        # sont JAMAIS supprimés automatiquement (ce sont des documents, pas des scans jetables → une
+        # suppression serait une perte de données irréversible).
         if not OPT_KEEP:
+            removed = 0
             for f in list(project_dir.glob("*")):
-                if f.is_file() and f.name != final_pdf.name and f.suffix.lower() in (".tif", ".tiff", ".pdf"):
+                if f.is_file() and f.suffix.lower() in (".tif", ".tiff"):
                     try:
-                        f.unlink()
+                        f.unlink(); removed += 1
                     except Exception:
                         pass
-            logger.info("Originaux supprimés (conservation désactivée).")
+            logger.info(f"{removed} TIFF original(aux) supprimé(s) ; PDF sources toujours conservés.")
 
         logger.info(f"✅ SUCCÈS : {project_name} → {final_pdf}")
         send_notification(project_name, f"PDF généré : {final_pdf.name}", True, logger)
