@@ -16,7 +16,7 @@ ScanToPDF automates the processing of bulk document scans. Instead of manually a
 
 - **Watch Folder** — Monitors a directory for new scanned images and processes them automatically
 - **Batch Grouping** — Groups pages belonging to the same document by their shared filename prefix (e.g., `Eg.w.O0.1901_29` → project `Eg.w.O0.1901`)
-- **PDF Input** — A PDF dropped in the watch folder is processed like a scan (OCR + PDF/A). Since the result reuses the same name, the source is kept alongside it as `<name>_original.pdf`
+- **PDF Input** — PDFs dropped in the watch folder are processed like scans (OCR + PDF/A). Paginated PDFs that share a document name (e.g. `Doc-1.pdf`, `Doc-2.pdf`, …) are merged into a single multi-page document; a standalone PDF is kept alongside its result as `<name>_original.pdf`
 - **OCR** — Powered by Tesseract via [ocrmypdf](https://github.com/ocrmypdf/Ocrmypdf) for text recognition and PDF/A compliance
 - **Image Corrections** — Automatic deskew and rotation to correct misfed scans
 - **Compression** — Reduces output file size without noticeable quality loss

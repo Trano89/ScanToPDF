@@ -135,6 +135,11 @@ PAGE_PATTERN      = re.compile(
 # Regex : identifiant + n° de pagination (sans sous-page) → un seul TIFF par projet.
 SINGLE_FILE_PATTERN = re.compile(
     rf"^(.+){PAGE_SEPARATOR}(\d{{1,3}})\.(tif|tiff)$", re.IGNORECASE)
+# PDF : pagination INDÉPENDANTE (le regroupement TIFF reste inchangé). Le marqueur de page peut être
+# le séparateur OU le délimiteur (« Doc-1.pdf », « Doc_1.pdf » → projet « Doc », page N). Les pages d'un
+# même document sont fusionnées en un seul PDF. Sans marqueur (ex. « Rapport.pdf ») → PDF autonome.
+PDF_PAGE_PATTERN = re.compile(
+    rf"^(.+)[{PAGE_SEPARATOR}{PAGE_DELIMITER}](\d{{1,3}})\.pdf$", re.IGNORECASE)
 
 
 # (init_logging est fourni par le module partagé _logsetup.py)
@@ -172,8 +177,12 @@ def detect_and_group(logger: logging.Logger) -> dict:
         if not entry.is_file():
             continue
         if entry.suffix.lower() == ".pdf":
-            # Un PDF est un document complet → son propre projet (nom = fichier sans extension).
-            groups.setdefault(entry.stem.strip(), []).append((0, entry))
+            # PDF : pagination indépendante (« Doc-1.pdf » → projet « Doc », page 1). Sans marqueur → autonome.
+            m = PDF_PAGE_PATTERN.match(entry.name)
+            if m:
+                groups.setdefault(m.group(1).strip(), []).append((int(m.group(2)), entry))
+            else:
+                groups.setdefault(entry.stem.strip(), []).append((0, entry))
             continue
         page_match = PAGE_PATTERN.match(entry.name)
         if page_match:
@@ -236,6 +245,26 @@ def merge_tiffs(project_name: str, project_dir: Path, tiff_files: list, logger: 
         all_frames[0].save(str(merged_path), format="TIFF", save_all=True,
                            append_images=all_frames[1:], compression="tiff_lzw")
     logger.info(f"TIFF fusionné ({total} page(s)) : {merged_path.name}")
+    return merged_path
+
+
+# ─────────────────────────────────────────────────────────────
+# FUSION — plusieurs PDF paginés en un seul document (pikepdf)
+# ─────────────────────────────────────────────────────────────
+def merge_pdfs(project_name: str, pdf_paths: list, logger: logging.Logger) -> Path:
+    """Concatène (dans l'ordre reçu) plusieurs PDF en un seul document, sans perte."""
+    import pikepdf
+    TEMP_DIR.mkdir(parents=True, exist_ok=True)
+    merged_path = TEMP_DIR / f"{project_name}_merged.pdf"
+    dst = pikepdf.Pdf.new()
+    try:
+        for p in pdf_paths:
+            with pikepdf.Pdf.open(str(p)) as src:
+                dst.pages.extend(src.pages)
+        dst.save(str(merged_path))
+    finally:
+        dst.close()
+    logger.info(f"PDF fusionné ({len(pdf_paths)} fichier(s)) : {merged_path.name}")
     return merged_path
 
 
@@ -624,16 +653,26 @@ def process_project(project_name: str, tiff_files: list, logger: logging.Logger)
     logger.info(f"===== DÉBUT : {project_name} =====")
     project_dir = SCAN_DIR / project_name
     try:
-        # Entrée PDF (document déjà complet) : pas de fusion TIFF ; l'ORIGINAL est préservé sous
-        # « <nom>_original.pdf » car le résultat portera « <nom>.pdf » (évite l'écrasement + le distingue).
-        pdf_in = (len(tiff_files) == 1 and tiff_files[0][1].suffix.lower() == ".pdf")
-        if pdf_in:
+        # Entrée PDF : les PDF paginés d'un même document (« Doc-1.pdf », « Doc-2.pdf »…) sont FUSIONNÉS
+        # en un seul « <projet>.pdf ». Un PDF autonome dont le nom = la sortie est préservé sous
+        # « <nom>_original.pdf » (évite l'écrasement + le distingue du résultat).
+        pdf_group = all(f.suffix.lower() == ".pdf" for _, f in tiff_files)
+        if pdf_group:
             project_dir = SCAN_DIR / project_name
             project_dir.mkdir(parents=True, exist_ok=True)
-            original = _unique_path(project_dir / f"{project_name}_original.pdf")
-            shutil.move(str(tiff_files[0][1]), str(original))
-            logger.info(f"PDF original conservé sous : {original.name}")
-            staged = run_ocr(original, project_name, logger)
+            moved = []
+            for _, f in sorted(tiff_files, key=lambda x: x[0]):
+                if f.name == f"{project_name}.pdf":                 # collision avec la sortie
+                    dst = _unique_path(project_dir / f"{project_name}_original.pdf")
+                else:
+                    dst = project_dir / f.name
+                    if dst.exists():
+                        dst = _unique_path(dst)
+                shutil.move(str(f), str(dst))
+                moved.append(dst)
+            logger.info(f"{len(moved)} PDF isolé(s) dans : {project_dir}")
+            source = moved[0] if len(moved) == 1 else merge_pdfs(project_name, moved, logger)
+            staged = run_ocr(source, project_name, logger)
         else:
             project_dir = isolate_originals(project_name, tiff_files, logger)
             merged      = merge_tiffs(project_name, project_dir, tiff_files, logger)
@@ -642,10 +681,10 @@ def process_project(project_name: str, tiff_files: list, logger: logging.Logger)
         final_pdf   = finalize_pdf(staged, project_name, project_dir, logger)
 
         # Suppression optionnelle des originaux (case « Conserver les originaux » décochée) :
-        # TIFF isolés ET « <nom>_original*.pdf » ; on garde toujours le résultat « <nom>.pdf ».
+        # tout ce qui n'est PAS le résultat final (TIFF isolés, PDF sources paginés, « _original.pdf »).
         if not OPT_KEEP:
             for f in list(project_dir.glob("*")):
-                if f.suffix.lower() in (".tif", ".tiff") or f.name.startswith(f"{project_name}_original"):
+                if f.is_file() and f.name != final_pdf.name and f.suffix.lower() in (".tif", ".tiff", ".pdf"):
                     try:
                         f.unlink()
                     except Exception:
