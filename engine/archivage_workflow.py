@@ -171,6 +171,10 @@ def detect_and_group(logger: logging.Logger) -> dict:
     for entry in SCAN_DIR.iterdir():
         if not entry.is_file():
             continue
+        if entry.suffix.lower() == ".pdf":
+            # Un PDF est un document complet → son propre projet (nom = fichier sans extension).
+            groups.setdefault(entry.stem.strip(), []).append((0, entry))
+            continue
         page_match = PAGE_PATTERN.match(entry.name)
         if page_match:
             project_name = page_match.group(1).strip()
@@ -253,9 +257,12 @@ def tiff_to_pdf_direct(tiff_path: Path, out_pdf: Path, logger: logging.Logger):
 def run_ocr(tiff_path: Path, project_name: str, logger: logging.Logger) -> Path:
     out_pdf = TEMP_DIR / f"{project_name}_ocr.pdf"
     image_steps = OPT_DESKEW or OPT_CLEAN or OPT_ROTATE
+    is_pdf_in = tiff_path.suffix.lower() == ".pdf"   # ocrmypdf accepte aussi un PDF en entrée
 
-    # Ni OCR ni traitement image → conversion directe (rapide, sans dépendance externe).
+    # Ni OCR ni traitement image → rien à faire ici (finalize_pdf compressera/normalisera).
     if not OPT_OCR and not image_steps:
+        if is_pdf_in:
+            return tiff_path                     # déjà un PDF
         tiff_to_pdf_direct(tiff_path, out_pdf, logger)
         return out_pdf
 
@@ -291,7 +298,11 @@ def run_ocr(tiff_path: Path, project_name: str, logger: logging.Logger) -> Path:
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800, env=env)
     if result.returncode != 0:
         logger.error(f"OCRmyPDF échoué (code {result.returncode}) : {result.stderr.strip()}")
-        # Repli tolérant : si l'OCR n'était pas requis, on convertit directement.
+        # Repli tolérant : PDF en entrée → on finalise l'original sans couche OCR ;
+        # TIFF sans OCR requis → conversion directe. Sinon on lève.
+        if is_pdf_in:
+            logger.info("Repli : le PDF original sera finalisé sans couche OCR.")
+            return tiff_path
         if not OPT_OCR:
             tiff_to_pdf_direct(tiff_path, out_pdf, logger)
             return out_pdf
@@ -613,21 +624,33 @@ def process_project(project_name: str, tiff_files: list, logger: logging.Logger)
     logger.info(f"===== DÉBUT : {project_name} =====")
     project_dir = SCAN_DIR / project_name
     try:
-        project_dir = isolate_originals(project_name, tiff_files, logger)
-        merged      = merge_tiffs(project_name, project_dir, tiff_files, logger)
-        staged      = run_ocr(merged, project_name, logger)
+        # Entrée PDF (document déjà complet) : pas de fusion TIFF ; l'ORIGINAL est préservé sous
+        # « <nom>_original.pdf » car le résultat portera « <nom>.pdf » (évite l'écrasement + le distingue).
+        pdf_in = (len(tiff_files) == 1 and tiff_files[0][1].suffix.lower() == ".pdf")
+        if pdf_in:
+            project_dir = SCAN_DIR / project_name
+            project_dir.mkdir(parents=True, exist_ok=True)
+            original = _unique_path(project_dir / f"{project_name}_original.pdf")
+            shutil.move(str(tiff_files[0][1]), str(original))
+            logger.info(f"PDF original conservé sous : {original.name}")
+            staged = run_ocr(original, project_name, logger)
+        else:
+            project_dir = isolate_originals(project_name, tiff_files, logger)
+            merged      = merge_tiffs(project_name, project_dir, tiff_files, logger)
+            staged      = run_ocr(merged, project_name, logger)
         # finalize_pdf gère en un seul passage Ghostscript : compression @ DPI et/ou vrai PDF/A-2b.
         final_pdf   = finalize_pdf(staged, project_name, project_dir, logger)
 
-        # Suppression optionnelle des TIFF originaux (case « Conserver les TIFF » décochée).
+        # Suppression optionnelle des originaux (case « Conserver les originaux » décochée) :
+        # TIFF isolés ET « <nom>_original*.pdf » ; on garde toujours le résultat « <nom>.pdf ».
         if not OPT_KEEP:
             for f in list(project_dir.glob("*")):
-                if f.suffix.lower() in (".tif", ".tiff"):
+                if f.suffix.lower() in (".tif", ".tiff") or f.name.startswith(f"{project_name}_original"):
                     try:
                         f.unlink()
                     except Exception:
                         pass
-            logger.info("TIFF originaux supprimés (conservation désactivée).")
+            logger.info("Originaux supprimés (conservation désactivée).")
 
         logger.info(f"✅ SUCCÈS : {project_name} → {final_pdf}")
         send_notification(project_name, f"PDF généré : {final_pdf.name}", True, logger)
@@ -656,7 +679,7 @@ def main():
         logger.info(f"ScanToPDF — surveillance : {SCAN_DIR}")
         groups = detect_and_group(logger)
         if not groups:
-            logger.info("Aucun fichier TIFF à traiter.")
+            logger.info("Aucun fichier TIFF/PDF à traiter.")
             return
         logger.info(f"{len(groups)} projet(s) à traiter.")
         for project_name, tiff_files in groups.items():

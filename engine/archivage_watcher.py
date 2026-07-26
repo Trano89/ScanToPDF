@@ -92,7 +92,7 @@ class Worker(threading.Thread):
             d = {}
             try:
                 for p in SCAN_DIR.iterdir():
-                    if p.is_file() and p.suffix.lower() in (".tif", ".tiff"):
+                    if p.is_file() and p.suffix.lower() in (".tif", ".tiff", ".pdf"):
                         try:
                             st = p.stat(); d[p.name] = (st.st_size, int(st.st_mtime))
                         except FileNotFoundError:
@@ -198,7 +198,7 @@ class TiffHandler(FileSystemEventHandler):
             same_dir = p.parent.resolve() == SCAN_DIR.resolve()
         except Exception:
             same_dir = False
-        return same_dir and p.suffix.lower() in (".tif", ".tiff")
+        return same_dir and p.suffix.lower() in (".tif", ".tiff", ".pdf")
 
     def on_created(self, event):
         if not event.is_directory and self._is_tiff_at_root(event.src_path):
@@ -211,7 +211,7 @@ class TiffHandler(FileSystemEventHandler):
 
 def _has_pending_tiffs() -> bool:
     try:
-        return any(p.is_file() and p.suffix.lower() in (".tif", ".tiff") for p in SCAN_DIR.iterdir())
+        return any(p.is_file() and p.suffix.lower() in (".tif", ".tiff", ".pdf") for p in SCAN_DIR.iterdir())
     except Exception:
         return False
 

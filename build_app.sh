@@ -13,7 +13,7 @@ PROJ="$(pwd)"
 
 APP_NAME="ScanToPDF"
 BUNDLE_ID="com.antonin.scantopdf"
-VERSION="1.0.3"
+VERSION="1.0.4"
 # Numéro de build COURT et monotone : minutes écoulées depuis 2026-01-01 UTC (≈ 6 chiffres, ex. 266401).
 # Croissant dans le temps → comparable entre Mac pour la mise à jour réseau. (1767225600 = 2026-01-01 00:00 UTC)
 # Build number : minutes écoulées depuis 2026-01-01 UTC (≈ 6 chiffres, ex. 266401).
