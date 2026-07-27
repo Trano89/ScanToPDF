@@ -23,7 +23,9 @@ struct AppConfig: Codable {
     var dpi: Int = 150               // résolution cible de la compression
     var pdfa: Bool = true            // sortie PDF/A-2b (métadonnées) sinon PDF simple
     var notify: Bool = true          // notification macOS en fin de traitement
-    var keepOriginals: Bool = true   // conserver les TIFF isolés dans le sous-dossier projet
+    // Suppression des originaux : opt-in EXPLICITE, OFF par défaut. Les originaux (TIFF ET PDF) sont
+    // conservés dans le sous-dossier projet ; activé, ils sont supprimés à l'identique (jamais le résultat).
+    var deleteOriginals: Bool = false
     // Filigrane apposé sur chaque page :
     var watermarkEnabled: Bool = false           // activer le filigrane
     var watermarkText: String = ""               // texte du filigrane (ex. « ARCHIVES FVJC »)
@@ -65,7 +67,7 @@ struct AppConfig: Codable {
         dpi = max(72, min(600, d(.dpi, dpi)))     // borné : un config.json trafiqué ne casse pas gs
         pdfa = d(.pdfa, pdfa)
         notify = d(.notify, notify)
-        keepOriginals = d(.keepOriginals, keepOriginals)
+        deleteOriginals = d(.deleteOriginals, deleteOriginals)
         watermarkEnabled = d(.watermarkEnabled, watermarkEnabled)
         watermarkText = d(.watermarkText, watermarkText)
         watermarkPosition = d(.watermarkPosition, watermarkPosition)

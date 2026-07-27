@@ -91,7 +91,9 @@ except (TypeError, ValueError):
     OPT_DPI  = 150
 OPT_PDFA     = bool(_CFG.get("pdfa", True))
 OPT_NOTIFY   = bool(_CFG.get("notify", True))
-OPT_KEEP     = bool(_CFG.get("keepOriginals", True))
+# Suppression des originaux : opt-in EXPLICITE, désactivé par défaut (aucune perte de données par
+# défaut). Quand activé, supprime les originaux TIFF *et* PDF de façon IDENTIQUE (jamais le résultat).
+OPT_DELETE   = bool(_CFG.get("deleteOriginals", False))
 
 # Filigrane (texte apposé sur chaque page) : contenu, placement, opacité, et « en dur » (fusionné,
 # non supprimable) vs calque OCG (masquable/supprimable dans un lecteur PDF).
@@ -205,31 +207,39 @@ def detect_and_group(logger: logging.Logger) -> dict:
 # ─────────────────────────────────────────────────────────────
 # ISOLATION — déplacement des originaux vers le sous-dossier projet
 # ─────────────────────────────────────────────────────────────
-def isolate_originals(project_name: str, tiff_files: list, logger: logging.Logger) -> Path:
+def isolate_originals(project_name: str, source_files: list, logger: logging.Logger) -> tuple:
+    """Déplace les originaux (TIFF **ou** PDF, traités à l'identique) vers le sous-dossier projet.
+    SEULE différence PDF : si un original porte déjà le nom du résultat final (« <projet>.pdf »),
+    il est renommé « <projet>_original.pdf » pour ne pas entrer en concurrence avec la sortie.
+    Ne JAMAIS écraser un original déjà archivé (versionné horodaté). Retourne (project_dir, [chemins isolés])."""
     project_dir = SCAN_DIR / project_name
     project_dir.mkdir(parents=True, exist_ok=True)
-    for _, src_path in tiff_files:
-        dst_path = project_dir / src_path.name
-        if dst_path.exists():
-            # Ne JAMAIS écraser un original déjà archivé (outil d'archivage → perte définitive) :
-            # on horodate le nouvel arrivant.
-            stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            dst_path = project_dir / f"{src_path.stem}_{stamp}{src_path.suffix}"
-            logger.warning(f"Original homonyme existant — nouvel arrivant conservé sous « {dst_path.name} » (pas d'écrasement).")
+    result_name = f"{project_name}.pdf"
+    moved = []
+    for _, src_path in sorted(source_files, key=lambda x: x[0]):
+        if src_path.suffix.lower() == ".pdf" and src_path.name == result_name:
+            # Différence PDF : l'original entrerait en concurrence avec le résultat → « _original.pdf ».
+            dst_path = _unique_path(project_dir / f"{project_name}_original.pdf")
+            logger.info(f"PDF original homonyme du résultat — conservé sous « {dst_path.name} ».")
+        else:
+            dst_path = project_dir / src_path.name
+            if dst_path.exists():
+                dst_path = _unique_path(dst_path)
+                logger.warning(f"Original homonyme existant — conservé sous « {dst_path.name} » (pas d'écrasement).")
         shutil.move(str(src_path), str(dst_path))
-    logger.info(f"Originaux isolés dans : {project_dir}")
-    return project_dir
+        moved.append(dst_path)
+    logger.info(f"{len(moved)} original(aux) isolé(s) dans : {project_dir}")
+    return project_dir, moved
 
 
 # ─────────────────────────────────────────────────────────────
 # FUSION — TIFF multipage dans temp_processing
 # ─────────────────────────────────────────────────────────────
-def merge_tiffs(project_name: str, project_dir: Path, tiff_files: list, logger: logging.Logger) -> Path:
+def merge_tiffs(project_name: str, page_paths: list, logger: logging.Logger) -> Path:
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
     merged_path = TEMP_DIR / f"{project_name}_merged.tiff"
     all_frames = []
-    for _, original_path in tiff_files:
-        page_path = project_dir / original_path.name
+    for page_path in page_paths:
         with Image.open(page_path) as src:          # ferme le handle (pas de fuite de descripteur)
             for frame in ImageSequence.Iterator(src):
                 frame_copy = frame.copy()
@@ -649,50 +659,36 @@ def export_result(project_dir: Path, project_name: str, logger: logging.Logger):
 # ─────────────────────────────────────────────────────────────
 # TRAITEMENT D'UN PROJET
 # ─────────────────────────────────────────────────────────────
-def process_project(project_name: str, tiff_files: list, logger: logging.Logger):
+def process_project(project_name: str, source_files: list, logger: logging.Logger):
     logger.info(f"===== DÉBUT : {project_name} =====")
     project_dir = SCAN_DIR / project_name
     try:
-        # Entrée PDF : les PDF paginés d'un même document (« Doc-1.pdf », « Doc-2.pdf »…) sont FUSIONNÉS
-        # en un seul « <projet>.pdf ». Un PDF autonome dont le nom = la sortie est préservé sous
-        # « <nom>_original.pdf » (évite l'écrasement + le distingue du résultat).
-        pdf_group = all(f.suffix.lower() == ".pdf" for _, f in tiff_files)
-        if pdf_group:
-            project_dir = SCAN_DIR / project_name
-            project_dir.mkdir(parents=True, exist_ok=True)
-            moved = []
-            for _, f in sorted(tiff_files, key=lambda x: x[0]):
-                if f.name == f"{project_name}.pdf":                 # collision avec la sortie
-                    dst = _unique_path(project_dir / f"{project_name}_original.pdf")
-                else:
-                    dst = project_dir / f.name
-                    if dst.exists():
-                        dst = _unique_path(dst)
-                shutil.move(str(f), str(dst))
-                moved.append(dst)
-            logger.info(f"{len(moved)} PDF isolé(s) dans : {project_dir}")
+        # VOIE UNIQUE — TIFF et PDF traités À L'IDENTIQUE : isolation des originaux → fusion → OCR →
+        # finalisation PDF/A. Les originaux sont TOUJOURS conservés (sauf option « Supprimer les originaux »
+        # activée, opt-in ci-dessous). Seule différence PDF : un original homonyme du résultat est renommé
+        # « <projet>_original.pdf » (géré dans isolate_originals).
+        project_dir, moved = isolate_originals(project_name, source_files, logger)
+        is_pdf = all(p.suffix.lower() == ".pdf" for p in moved)
+        if is_pdf:
+            # PDF paginés d'un même document → fusionnés en un seul ; PDF autonome → tel quel.
             source = moved[0] if len(moved) == 1 else merge_pdfs(project_name, moved, logger)
-            staged = run_ocr(source, project_name, logger)
         else:
-            project_dir = isolate_originals(project_name, tiff_files, logger)
-            merged      = merge_tiffs(project_name, project_dir, tiff_files, logger)
-            staged      = run_ocr(merged, project_name, logger)
+            source = merge_tiffs(project_name, moved, logger)
+        staged = run_ocr(source, project_name, logger)
         # finalize_pdf gère en un seul passage Ghostscript : compression @ DPI et/ou vrai PDF/A-2b.
-        final_pdf   = finalize_pdf(staged, project_name, project_dir, logger)
+        final_pdf = finalize_pdf(staged, project_name, project_dir, logger)
 
-        # Suppression optionnelle : SEULS les TIFF intermédiaires (volumineux) sont supprimés quand la
-        # case « Conserver les TIFF originaux » est décochée. Les PDF SOURCES déposés par l'utilisateur ne
-        # sont JAMAIS supprimés automatiquement (ce sont des documents, pas des scans jetables → une
-        # suppression serait une perte de données irréversible).
-        if not OPT_KEEP:
+        # Suppression optionnelle des ORIGINAUX (opt-in EXPLICITE, OFF par défaut → aucune perte par
+        # défaut). Supprime uniquement les originaux isolés (TIFF *et* PDF, à l'identique), JAMAIS le résultat.
+        if OPT_DELETE:
             removed = 0
-            for f in list(project_dir.glob("*")):
-                if f.is_file() and f.suffix.lower() in (".tif", ".tiff"):
-                    try:
+            for f in moved:
+                try:
+                    if f.exists() and f != final_pdf:
                         f.unlink(); removed += 1
-                    except Exception:
-                        pass
-            logger.info(f"{removed} TIFF original(aux) supprimé(s) ; PDF sources toujours conservés.")
+                except Exception:
+                    pass
+            logger.info(f"{removed} original(aux) supprimé(s) (option « Supprimer les originaux » activée).")
 
         logger.info(f"✅ SUCCÈS : {project_name} → {final_pdf}")
         send_notification(project_name, f"PDF généré : {final_pdf.name}", True, logger)

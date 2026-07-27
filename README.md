@@ -16,7 +16,7 @@ ScanToPDF automates the processing of bulk document scans. Instead of manually a
 
 - **Watch Folder** — Monitors a directory for new scanned images and processes them automatically
 - **Batch Grouping** — Groups pages belonging to the same document by their shared filename prefix (e.g., `Eg.w.O0.1901_29` → project `Eg.w.O0.1901`)
-- **PDF Input** — PDFs dropped in the watch folder are processed like scans (OCR + PDF/A). Paginated PDFs that share a document name (e.g. `Doc-1.pdf`, `Doc-2.pdf`, …) are merged into a single multi-page document; a standalone PDF is kept alongside its result as `<name>_original.pdf`
+- **PDF Input** — PDFs are processed **exactly like TIFF scans** (same pipeline: isolate → merge → OCR → PDF/A). Paginated PDFs sharing a document name (e.g. `Doc-1.pdf`, `Doc-2.pdf`, …) are merged into one multi-page document. The only PDF-specific rule: if a source PDF's name would collide with the final result (`<project>.pdf`), the original is preserved as `<project>_original.pdf`
 - **OCR** — Powered by Tesseract via [ocrmypdf](https://github.com/ocrmypdf/Ocrmypdf) for text recognition and PDF/A compliance
 - **Image Corrections** — Automatic deskew and rotation to correct misfed scans
 - **Compression** — Reduces output file size without noticeable quality loss
@@ -89,7 +89,7 @@ The app is configured through a `config.json` file stored in `/Users/Shared/Scan
   "rotateThreshold": 15,
   "compress": true,
   "pdfa": true,
-  "keepOriginals": true,
+  "deleteOriginals": false,
   "clean": true,
   "watermarkEnabled": false,
   "watermarkText": "",
@@ -121,7 +121,7 @@ The app is configured through a `config.json` file stored in `/Users/Shared/Scan
 | `rotateThreshold` | Minimum rotation angle (degrees) to trigger correction | `15` |
 | `compress` | Compress images in the output PDF | `true` |
 | `pdfa` | Output PDF/A archival format | `true` |
-| `keepOriginals` | Keep source images after processing | `true` |
+| `deleteOriginals` | Delete source files (TIFF **and** PDF alike) after the result is produced. Off by default — originals are always kept | `false` |
 | `clean` | Clean temporary files after processing | `true` |
 | `watermarkEnabled` | Apply a watermark to each page | `false` |
 | `watermarkText` | Watermark text to display | `""` |
@@ -157,7 +157,7 @@ The app detects the new files and:
 
 ### 3. Output
 
-Finished PDFs are saved alongside the original scan images (controlled by `keepOriginals`). If network export is enabled, copies are also sent to your NAS/share.
+Finished PDFs are saved alongside the original source files, which are always kept unless you explicitly enable `deleteOriginals`. If network export is enabled, copies are also sent to your NAS/share.
 
 ### Logs
 

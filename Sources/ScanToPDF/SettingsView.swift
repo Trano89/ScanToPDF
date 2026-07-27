@@ -28,7 +28,6 @@ struct SettingsView: View {
     @EnvironmentObject var model: AppModel
     @State private var folder: String = AppModel.shared.config.watchFolder
     @State private var passphrase: String = AppModel.shared.clusterPassphrase
-    @State private var wmText: String = AppModel.shared.config.watermarkText
     @State private var pageSepChar: PageSeparator = {
         guard let found = PageSeparator.allCases.first(where: { $0.rawValue == AppModel.shared.config.pageSeparator }) else { return .underscore }
         return found
@@ -108,7 +107,11 @@ struct SettingsView: View {
                         .padding(.leading, 18)
                     }
                     Toggle("Sortie PDF/A-2b (archivage normalisé)", isOn: toggle(\.pdfa))
-                    Toggle("Conserver les TIFF originaux", isOn: toggle(\.keepOriginals))
+                    Toggle("Supprimer les originaux après traitement", isOn: toggle(\.deleteOriginals))
+                    Text(model.config.deleteOriginals
+                         ? "⚠️ Les originaux (TIFF et PDF) seront supprimés après génération du PDF."
+                         : "Les originaux (TIFF et PDF) sont conservés dans le sous-dossier du projet.")
+                        .font(.caption).foregroundStyle(model.config.deleteOriginals ? .orange : .secondary)
                     Toggle("Notification macOS en fin de traitement", isOn: toggle(\.notify))
                 }
 
@@ -142,9 +145,12 @@ struct SettingsView: View {
                 Section("Filigrane") {
                     Toggle("Apposer un filigrane sur chaque page", isOn: toggle(\.watermarkEnabled))
                     if model.config.watermarkEnabled {
-                        TextField("Texte (ex. ARCHIVES FVJC)", text: $wmText)
+                        // Liaison DIRECTE : chaque frappe est persistée dans config.json (le champ ne
+                        // dépend plus d'un « Entrée »/bouton — sinon le texte tapé pouvait être perdu).
+                        TextField("Texte (ex. ARCHIVES FVJC)", text: Binding(
+                            get: { model.config.watermarkText },
+                            set: { v in model.update { $0.watermarkText = v } }))
                             .textFieldStyle(.roundedBorder)
-                            .onSubmit { model.update { $0.watermarkText = wmText } }
                         Picker("Placement", selection: Binding(
                             get: { model.config.watermarkPosition },
                             set: { v in model.update { $0.watermarkPosition = v } })) {
@@ -164,7 +170,6 @@ struct SettingsView: View {
                              ? "Fusionné définitivement dans le PDF (impossible à retirer)."
                              : "Ajouté comme calque « Filigrane » masquable/supprimable dans un lecteur PDF.")
                             .font(.caption).foregroundStyle(.secondary)
-                        Button("Enregistrer le texte") { model.update { $0.watermarkText = wmText } }
                     }
                 }
 
