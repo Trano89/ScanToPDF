@@ -95,10 +95,14 @@ OPT_NOTIFY   = bool(_CFG.get("notify", True))
 # défaut). Quand activé, supprime les originaux TIFF *et* PDF de façon IDENTIQUE (jamais le résultat).
 OPT_DELETE   = bool(_CFG.get("deleteOriginals", False))
 
-# Filigrane (texte apposé sur chaque page) : contenu, placement, opacité, et « en dur » (fusionné,
-# non supprimable) vs calque OCG (masquable/supprimable dans un lecteur PDF).
+# Filigrane apposé sur chaque page : TEXTE ou IMAGE (PNG…) au choix, avec placement, opacité et
+# « en dur » (fusionné, non supprimable) vs calque OCG (masquable/supprimable dans un lecteur PDF).
 OPT_WM       = bool(_CFG.get("watermarkEnabled", False))
+WM_TYPE      = str(_CFG.get("watermarkType", "text")).strip().lower()
+if WM_TYPE not in ("text", "image"):
+    WM_TYPE = "text"
 WM_TEXT      = str(_CFG.get("watermarkText", "")).strip()
+WM_IMAGE     = Path(str(_CFG.get("watermarkImagePath", "")).strip()).expanduser()
 WM_POS       = str(_CFG.get("watermarkPosition", "diagonal")).strip()
 if WM_POS not in ("diagonal", "center", "top", "bottom", "tile"):
     WM_POS = "diagonal"
@@ -107,8 +111,12 @@ try:
 except (TypeError, ValueError):
     WM_OPACITY = 20
 WM_HARD      = bool(_CFG.get("watermarkHard", True))
-if not WM_TEXT:
-    OPT_WM = False   # pas de texte → pas de filigrane
+# Rien à apposer (texte vide / image absente) → filigrane désactivé plutôt qu'un passage gs inutile.
+if WM_TYPE == "image":
+    if not (str(WM_IMAGE) and WM_IMAGE.is_absolute() and WM_IMAGE.is_file()):
+        OPT_WM = False
+elif not WM_TEXT:
+    OPT_WM = False
 
 # Export du résultat vers le NAS (priorité) ou le dossier Synology Drive (repli).
 OPT_EXPORT   = bool(_CFG.get("exportEnabled", False))
@@ -416,14 +424,10 @@ def _ps_escape(s: str) -> str:
     return "".join(out)
 
 
-def _watermark_ps(text: str, position: str, opacity: int, hard: bool):
-    """Construit le PostScript (-c) qui dessine le filigrane sur CHAQUE page (hook EndPage).
+def _wm_endpage(prelude: str, body: str, hard: bool) -> str:
+    """Assemble le PostScript du filigrane : préambule + calque OCG éventuel + hook EndPage (exécuté
+    sur CHAQUE page). Commun aux filigranes TEXTE et IMAGE.
     hard=False → le filigrane est placé dans un calque OCG « Filigrane » (masquable/supprimable)."""
-    txt = _ps_escape(text or "")
-    if not txt.strip():
-        return None
-    gray = max(0.0, min(1.0, 1.0 - float(opacity) / 100.0))   # opacité 20 → gris 0.80 (léger)
-
     ocg_reg = oc_begin = oc_end = ""
     if not hard:
         ocg_reg = ("[ /_objdef {oc_wm} /type /dict /OBJ pdfmark "
@@ -431,6 +435,20 @@ def _watermark_ps(text: str, position: str, opacity: int, hard: bool):
                    "[ {Catalog} << /OCProperties << /OCGs [ {oc_wm} ] /D << /ON [ {oc_wm} ] >> >> >> /PUT pdfmark ")
         oc_begin = "[ /OC {oc_wm} /BDC pdfmark "
         oc_end = "[ /EMC pdfmark "
+    endpage = ("<< /EndPage { exch pop 0 eq { gsave "
+               "currentpagedevice /PageSize get aload pop /ph exch def /pw exch def "
+               + oc_begin + body + oc_end +
+               "grestore true }{ false } ifelse } bind >> setpagedevice ")
+    return prelude + ocg_reg + endpage
+
+
+def _watermark_text_ps(text: str, position: str, opacity: int, hard: bool):
+    """Filigrane TEXTE : Helvetica ISOLatin1 auto-dimensionnée ; l'opacité est rendue par le niveau de
+    gris (PostScript n'expose pas d'alpha réel dans ce contexte)."""
+    txt = _ps_escape(text or "")
+    if not txt.strip():
+        return None
+    gray = max(0.0, min(1.0, 1.0 - float(opacity) / 100.0))   # opacité 20 → gris 0.80 (léger)
 
     # Auto-dimensionne la police pour une largeur cible /TW, puis affiche centré horizontalement.
     autosize = ("/HelvISO findfont 1 scalefont setfont (%s) stringwidth pop /w1 exch def "
@@ -454,11 +472,90 @@ def _watermark_ps(text: str, position: str, opacity: int, hard: bool):
 
     fontdef = ("/HelvISO /Helvetica findfont dup length dict copy begin "
                "/Encoding ISOLatin1Encoding def currentdict end definefont pop ")
-    endpage = ("<< /EndPage { exch pop 0 eq { gsave "
-               "currentpagedevice /PageSize get aload pop /ph exch def /pw exch def "
-               + oc_begin + ("%.3f setgray " % gray) + body + oc_end +
-               "grestore true }{ false } ifelse } bind >> setpagedevice ")
-    return fontdef + ocg_reg + endpage
+    return _wm_endpage(fontdef, ("%.3f setgray " % gray) + body, hard)
+
+
+def _wm_image_data(path: Path, opacity: int):
+    """Prépare l'image du filigrane → (largeur, hauteur, pixels RGB, masque 1 bit).
+    Transparence : masque 1 bit — les pixels transparents ne sont PAS peints (le document reste lisible).
+    Opacité : fondu vers le blanc (comme le filigrane texte module son gris).
+    Réduction : borne le volume de données embarqué dans le PostScript."""
+    with Image.open(path) as src:
+        im = src.convert("RGBA")
+        maxdim = 1400
+        if max(im.size) > maxdim:
+            r = maxdim / float(max(im.size))
+            im = im.resize((max(1, int(im.width * r)), max(1, int(im.height * r))), Image.LANCZOS)
+        alpha = im.getchannel("A")
+        blend = alpha.point(lambda v: int(v * opacity / 100.0))
+        rgb = Image.composite(im.convert("RGB"), Image.new("RGB", im.size, "white"), blend)
+        # Bit à 1 = pixel NON peint (transparent) — convention ImageType 3 avec /Decode [0 1].
+        mask = alpha.point(lambda v: 255 if v <= 8 else 0).convert("1", dither=Image.Dither.NONE)
+        return im.width, im.height, rgb.tobytes(), mask.tobytes()
+
+
+def _wm_a85(data: bytes) -> str:
+    """Compresse (Flate) puis encode en ASCII85 pour intégration dans le PostScript. Le préfixe « <~ »
+    d'Adobe est retiré : l'ASCII85Decode de PostScript ne l'attend pas."""
+    import zlib
+    import base64
+    s = base64.a85encode(zlib.compress(data, 9), adobe=True, wrapcol=120).decode("ascii")
+    return s[2:] if s.startswith("<~") else s
+
+
+def _watermark_image_ps(path: Path, position: str, opacity: int, hard: bool):
+    """Filigrane IMAGE (PNG…) : image + masque de transparence (ImageType 3) dessinés sur chaque page.
+    Les données sont incluses en UN seul flux (image et masque concaténés) puis découpées par
+    getinterval — un seul flux inline = aucun problème de positionnement dans le fichier PostScript."""
+    try:
+        w, h, rgb, mask = _wm_image_data(path, opacity)
+    except Exception:
+        return None
+    if w < 1 or h < 1:
+        return None
+    prelude = (
+        "/wmW %d def /wmH %d def /wmAR %.6f def /wmRGBLen %d def /wmMskLen %d def "
+        % (w, h, w / float(h), len(rgb), len(mask))
+        + "/wmAll wmRGBLen wmMskLen add string def\n"
+        "{ currentfile /ASCII85Decode filter /FlateDecode filter wmAll readstring pop pop } exec\n"
+        + _wm_a85(rgb + mask) + "\n"
+        "/wmData wmAll 0 wmRGBLen getinterval def "
+        "/wmMask wmAll wmRGBLen wmMskLen getinterval def "
+        "/wmDraw { /DeviceRGB setcolorspace << /ImageType 3 /InterleaveType 3 "
+        "/DataDict << /ImageType 1 /Width wmW /Height wmH /BitsPerComponent 8 /Decode [0 1 0 1 0 1] "
+        "/ImageMatrix [wmW 0 0 wmH neg 0 wmH] /DataSource wmData >> "
+        "/MaskDict << /ImageType 1 /Width wmW /Height wmH /BitsPerComponent 1 /Decode [0 1] "
+        "/ImageMatrix [wmW 0 0 wmH neg 0 wmH] /DataSource wmMask >> >> image } bind def "
+    )
+    # Taille cible : largeur en fraction de page, hauteur plafonnée — rapport d'aspect conservé.
+    frac_w, frac_h = {"diagonal": (0.90, 0.60), "center": (0.85, 0.60), "top": (0.85, 0.12),
+                      "bottom": (0.85, 0.12), "tile": (0.28, 0.20)}.get(position, (0.90, 0.60))
+    size = ("/tw pw %.3f mul def /th tw wmAR div def "
+            "th ph %.3f mul gt { /th ph %.3f mul def /tw th wmAR mul def } if "
+            % (frac_w, frac_h, frac_h))
+    if position == "center":
+        body = size + "pw 2 div tw 2 div sub ph 2 div th 2 div sub translate tw th scale wmDraw "
+    elif position == "top":
+        body = size + "pw 2 div tw 2 div sub ph 0.93 mul th 2 div sub translate tw th scale wmDraw "
+    elif position == "bottom":
+        body = size + "pw 2 div tw 2 div sub ph 0.07 mul th 2 div sub translate tw th scale wmDraw "
+    elif position == "tile":
+        body = size + ("0 1 3 { /iy exch def 0 1 2 { /ix exch def gsave "
+                       "pw ix mul 3 div pw 6 div add ph iy mul 4 div ph 8 div add translate 30 rotate "
+                       "tw 2 div neg th 2 div neg translate tw th scale wmDraw grestore } for } for ")
+    else:  # diagonal
+        body = size + ("pw 2 div ph 2 div translate 45 rotate "
+                       "tw 2 div neg th 2 div neg translate tw th scale wmDraw ")
+    return _wm_endpage(prelude, body, hard)
+
+
+def _watermark_ps():
+    """PostScript du filigrane selon la configuration (texte OU image), None si rien à apposer."""
+    if not OPT_WM:
+        return None
+    if WM_TYPE == "image":
+        return _watermark_image_ps(WM_IMAGE, WM_POS, WM_OPACITY, WM_HARD)
+    return _watermark_text_ps(WM_TEXT, WM_POS, WM_OPACITY, WM_HARD)
 
 
 def run_ghostscript(src_pdf: Path, out_pdf: Path, pdfa: bool, downsample: bool, logger: logging.Logger,
@@ -482,16 +579,19 @@ def run_ghostscript(src_pdf: Path, out_pdf: Path, pdfa: bool, downsample: bool, 
                 "-dAutoFilterColorImages=false", "-dAutoFilterGrayImages=false",
                 "-dColorACSImageDict=/QFactor 0.22 /Blend 1 /ColorTransform 1 /HSamples [1 1 1 1] /VSamples [1 1 1 1]",
                 "-dGrayACSImageDict=/QFactor 0.22 /Blend 1 /HSamples [1 1 1 1] /VSamples [1 1 1 1]"]
-    cmd += [f"-sOutputFile={out_pdf}"]
-    # Filigrane : code PostScript exécuté AVANT les fichiers d'entrée (installe le hook EndPage).
-    if watermark_ps:
-        cmd += ["-c", watermark_ps]
-    cmd.append("-f")                             # fin du -c → ce qui suit sont des fichiers
+    cmd += [f"-sOutputFile={out_pdf}", "-f"]     # -f : ce qui suit sont des fichiers
+    TEMP_DIR.mkdir(parents=True, exist_ok=True)  # requis même sans fusion (PDF seul) pour les .ps générés
     if pdfa:
         icc = _srgb_icc()
         if not icc:
             raise RuntimeError("Profil ICC sRGB introuvable (PDF/A impossible).")
         cmd.append(str(_write_pdfa_def(icc)))   # doit précéder le PDF source
+    # Filigrane : PostScript exécuté AVANT le PDF source (installe le hook EndPage). Écrit dans un
+    # FICHIER plutôt que passé en « -c » : un filigrane image dépasse la taille maximale d'un argument.
+    if watermark_ps:
+        wm_file = TEMP_DIR / "watermark.ps"
+        wm_file.write_text(watermark_ps, encoding="latin-1")
+        cmd.append(str(wm_file))
     cmd.append(str(src_pdf))
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     if result.returncode != 0:
@@ -504,7 +604,7 @@ def run_ghostscript(src_pdf: Path, out_pdf: Path, pdfa: bool, downsample: bool, 
 def finalize_pdf(src_pdf: Path, project_name: str, project_dir: Path, logger: logging.Logger) -> Path:
     # Sortie VERSIONNÉE : on n'écrase jamais un PDF déjà archivé (anti-perte de données, #4).
     final = _unique_path(project_dir / f"{project_name}.pdf")
-    wm = _watermark_ps(WM_TEXT, WM_POS, WM_OPACITY, WM_HARD) if OPT_WM else None
+    wm = _watermark_ps()
 
     if OPT_PDFA:
         try:
@@ -668,12 +768,20 @@ def process_project(project_name: str, source_files: list, logger: logging.Logge
         # activée, opt-in ci-dessous). Seule différence PDF : un original homonyme du résultat est renommé
         # « <projet>_original.pdf » (géré dans isolate_originals).
         project_dir, moved = isolate_originals(project_name, source_files, logger)
-        is_pdf = all(p.suffix.lower() == ".pdf" for p in moved)
-        if is_pdf:
+        pdfs   = [p for p in moved if p.suffix.lower() == ".pdf"]
+        images = [p for p in moved if p.suffix.lower() != ".pdf"]
+        if not pdfs:
+            source = merge_tiffs(project_name, images, logger)
+        elif not images:
             # PDF paginés d'un même document → fusionnés en un seul ; PDF autonome → tel quel.
-            source = moved[0] if len(moved) == 1 else merge_pdfs(project_name, moved, logger)
+            source = pdfs[0] if len(pdfs) == 1 else merge_pdfs(project_name, pdfs, logger)
         else:
-            source = merge_tiffs(project_name, moved, logger)
+            # Groupe MIXTE (TIFF et PDF portant le même nom de projet) : on convertit les TIFF puis on
+            # fusionne le tout, plutôt que d'échouer en ouvrant un PDF avec le lecteur d'images.
+            logger.warning("Groupe mixte TIFF + PDF — les pages TIFF sont placées en tête du document.")
+            tif_pdf = TEMP_DIR / f"{project_name}_tiffs.pdf"
+            tiff_to_pdf_direct(merge_tiffs(project_name, images, logger), tif_pdf, logger)
+            source = merge_pdfs(project_name, [tif_pdf] + pdfs, logger)
         staged = run_ocr(source, project_name, logger)
         # finalize_pdf gère en un seul passage Ghostscript : compression @ DPI et/ou vrai PDF/A-2b.
         final_pdf = finalize_pdf(staged, project_name, project_dir, logger)

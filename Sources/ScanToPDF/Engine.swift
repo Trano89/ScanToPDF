@@ -32,10 +32,11 @@ final class Engine {
         e["SCANTOPDF_CONFIG"] = AppPaths.configURL.path
         e["SCANTOPDF_GS"] = "\(binDir)/gs"
         e["SCANTOPDF_APPSUPPORT"] = AppPaths.appSupport.path
-        // Règles de regroupement (passées par env pour éviter de parser config.json à chaque lancement).
-        // Les valeurs par défaut sont les mêmes dans Config.swift — le Python lit aussi config.json en repli.
-        e["SCANTOPDF_PAGE_SEPARATOR"] = "_"  // caractère entre identifiant projet et n° pagination (ex. « _ »)
-        e["SCANTOPDF_PAGE_DELIMITER"] = "-"  // caractère entre n° doc et n° page (ex. « - »)
+        // Règles de regroupement : le moteur les lit dans config.json (source UNIQUE de vérité).
+        // On ne pose PLUS SCANTOPDF_PAGE_SEPARATOR/DELIMITER ici : ces variables étaient prioritaires
+        // côté Python et, figées en dur, elles écrasaient les séparateurs choisis dans les préférences.
+        e.removeValue(forKey: "SCANTOPDF_PAGE_SEPARATOR")
+        e.removeValue(forKey: "SCANTOPDF_PAGE_DELIMITER")
         e["SCAN_DIR"] = watchFolder
         e["TMPDIR"] = AppPaths.tempDir.path
         // Tesseract/OCRmyPDF : 1 thread par page, parallélisation au niveau pages (Apple Silicon).

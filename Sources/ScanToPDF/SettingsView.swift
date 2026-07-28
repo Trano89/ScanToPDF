@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 /// Caractères séparateurs courants utilisables dans le regroupement de fichiers.
 enum PageSeparator: String, Identifiable, CaseIterable {
@@ -64,7 +65,7 @@ struct SettingsView: View {
                         Spacer()
                         Button("Traiter maintenant") { model.processNow() }
                     }
-                    Text("Les TIFF déposés ici sont automatiquement convertis en PDF.")
+                    Text("Les TIFF et les PDF déposés ici sont traités de façon identique et convertis en PDF/A.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
 
@@ -145,12 +146,31 @@ struct SettingsView: View {
                 Section("Filigrane") {
                     Toggle("Apposer un filigrane sur chaque page", isOn: toggle(\.watermarkEnabled))
                     if model.config.watermarkEnabled {
-                        // Liaison DIRECTE : chaque frappe est persistée dans config.json (le champ ne
-                        // dépend plus d'un « Entrée »/bouton — sinon le texte tapé pouvait être perdu).
-                        TextField("Texte (ex. ARCHIVES FVJC)", text: Binding(
-                            get: { model.config.watermarkText },
-                            set: { v in model.update { $0.watermarkText = v } }))
-                            .textFieldStyle(.roundedBorder)
+                        Picker("Type", selection: Binding(
+                            get: { model.config.watermarkType },
+                            set: { v in model.update { $0.watermarkType = v } })) {
+                            Text("Texte").tag("text")
+                            Text("Image (PNG)").tag("image")
+                        }
+                        .pickerStyle(.segmented)
+                        if model.config.watermarkType == "image" {
+                            HStack {
+                                TextField("Fichier image (PNG, JPEG…)", text: Binding(
+                                    get: { model.config.watermarkImagePath },
+                                    set: { v in model.update { $0.watermarkImagePath = v } }))
+                                    .textFieldStyle(.roundedBorder)
+                                Button("Choisir…") { chooseWatermarkImage() }
+                            }
+                            Text(watermarkImageStatus)
+                                .font(.caption).foregroundStyle(watermarkImageOK ? Color.secondary : Color.orange)
+                        } else {
+                            // Liaison DIRECTE : chaque frappe est persistée dans config.json (le champ ne
+                            // dépend plus d'un « Entrée »/bouton — sinon le texte tapé pouvait être perdu).
+                            TextField("Texte (ex. ARCHIVES FVJC)", text: Binding(
+                                get: { model.config.watermarkText },
+                                set: { v in model.update { $0.watermarkText = v } }))
+                                .textFieldStyle(.roundedBorder)
+                        }
                         Picker("Placement", selection: Binding(
                             get: { model.config.watermarkPosition },
                             set: { v in model.update { $0.watermarkPosition = v } })) {
@@ -221,7 +241,7 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("ScanToPDF v\(AppVersion.short) (build \(AppVersion.build))")
                         .font(.caption).foregroundStyle(.secondary)
-                    if AppVersion.gitCount > 0 {
+                    if AppVersion.hasRevision {
                         Text("revision \(AppVersion.revision)")
                             .font(.caption2).foregroundStyle(.tertiary)
                     }
@@ -273,7 +293,8 @@ struct SettingsView: View {
             } else if model.updateIsRemote {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Nouvelle version disponible sur GitHub").font(.callout)
-                    Text("Build \(model.updatePeerBuild) — consultez les releases pour télécharger.").font(.caption).foregroundStyle(.secondary)
+                    Text("Version \(model.updateRemoteVersion) (vous avez la \(AppVersion.short)) — consultez les releases pour télécharger.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
                 Button("Voir sur GitHub") { openGitHubRelease() }.buttonStyle(.borderedProminent)
@@ -318,6 +339,34 @@ struct SettingsView: View {
             $0.nasSubpath = nasSubpath.trimmingCharacters(in: .whitespaces)
             $0.nasUser = nasUser.trimmingCharacters(in: .whitespaces)
             $0.driveFolder = driveFolder.trimmingCharacters(in: .whitespaces)
+        }
+    }
+
+    // Filigrane image : même validation que le moteur (chemin ABSOLU + fichier existant), affichée à
+    // l'utilisateur — sinon un chemin invalide désactiverait le filigrane sans explication visible.
+    private var watermarkImageOK: Bool {
+        let p = model.config.watermarkImagePath
+        return p.hasPrefix("/") && FileManager.default.fileExists(atPath: p)
+    }
+
+    private var watermarkImageStatus: String {
+        if model.config.watermarkImagePath.isEmpty { return "Choisissez une image — la transparence du PNG est conservée." }
+        return watermarkImageOK
+            ? "Image trouvée : la transparence est conservée, l'opacité éclaircit le motif."
+            : "⚠️ Fichier introuvable — aucun filigrane ne sera apposé."
+    }
+
+    private func chooseWatermarkImage() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [.png, .jpeg, .tiff]
+        if !model.config.watermarkImagePath.isEmpty {
+            panel.directoryURL = URL(fileURLWithPath: model.config.watermarkImagePath).deletingLastPathComponent()
+        }
+        if panel.runModal() == .OK, let url = panel.url {
+            model.update { $0.watermarkImagePath = url.path }
         }
     }
 

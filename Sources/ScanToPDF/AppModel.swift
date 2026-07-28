@@ -14,9 +14,9 @@ final class AppModel: ObservableObject {
     @Published var updateAvailable = false
     @Published var updatePeerName = ""
     @Published var updateInstalling = false
-    var updatePeerBuild: Int = 0           // build de la source qui propose une MAU (LAN ou GitHub)
-    @Published var updateRemoteBuild = 0   // alias : même valeur, pour l'affichage dans SettingsView
-    @Published var updateIsRemote = false  // true si la MAU vient de GitHub (pas d'install auto)
+    var updatePeerBuild: Int = 0             // build du Mac source (mise à jour LAN)
+    @Published var updateRemoteVersion = ""  // version de la release GitHub (ex. « 1.0.8 »)
+    @Published var updateIsRemote = false    // true si la MAU vient de GitHub (pas d'install auto)
     private var updateDismissedBuild = 0
     // Ancien automatisme (com.fvjc.archivage) détecté sur ce Mac → à supprimer (doublon).
     @Published var legacyDetected = false
@@ -42,16 +42,16 @@ final class AppModel: ObservableObject {
             Task { @MainActor in
                 guard let self, build > AppVersion.build, build > self.updateDismissedBuild, !self.updateInstalling else { return }
                 self.updatePeerBuild = build
-                self.updateRemoteBuild = build
                 self.updatePeerName = name
                 self.updateAvailable = true
                 self.updateIsRemote = false
             }
-        }, onRemoteUpdateAvailable: { [weak self] build in
+        }, onRemoteUpdateAvailable: { [weak self] version in
             Task { @MainActor in
-                guard let self, build > AppVersion.build, build > self.updateDismissedBuild, !self.updateInstalling else { return }
-                self.updatePeerBuild = build
-                self.updateRemoteBuild = build
+                guard let self, !self.updateInstalling,
+                      UpdateService.isNewer(version, than: AppVersion.short),
+                      version != self.config.dismissedUpdateVersion else { return }
+                self.updateRemoteVersion = version
                 self.updatePeerName = "GitHub"
                 self.updateAvailable = true
                 self.updateIsRemote = true
@@ -71,6 +71,8 @@ final class AppModel: ObservableObject {
         applyLoginItem()                // démarrage avec le système (login item)
         engine.start(watchFolder: config.watchFolder)
         if config.networkEnabled { updateService.start() }   // déclenche l'invite « Réseau local »
+        // Vérification GitHub : INDÉPENDANTE de la découverte LAN (elle fonctionne réseau local désactivé).
+        updateService.setRemoteUpdates(config.remoteUpdateEnabled)
         checkLegacyAutomation()          // ancien service en doublon → proposer sa suppression
         if config.exportEnabled { connectNAS() }             // monte le NAS (popup natif si besoin)
     }
@@ -83,11 +85,8 @@ final class AppModel: ObservableObject {
         nasStatus = "Connexion au NAS \(host)…"
         Task.detached { [weak self] in
             let path = MountManager.ensureMounted(host: host, share: share, user: user)
-            await MainActor.run {
-                self?.nasStatus = path != nil
-                    ? "NAS monté : \(path!)"
-                    : "NAS non monté (le repli Synology Drive sera utilisé)."
-            }
+            let message = path.map { "NAS monté : \($0)" } ?? "NAS non monté (le repli Synology Drive sera utilisé)."
+            await MainActor.run { [weak self] in self?.nasStatus = message }
         }
     }
 
@@ -119,7 +118,7 @@ final class AppModel: ObservableObject {
         status = "Suppression de l'ancien automatisme…"
         Task.detached { [weak self] in
             let reason = LegacyCleanup.remove()   // invite mot de passe admin (bloquant hors thread principal)
-            await MainActor.run {
+            await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.legacyRemoving = false
                 self.legacyDetected = LegacyCleanup.detected()
@@ -225,10 +224,16 @@ final class AppModel: ObservableObject {
         }
     }
 
+    // « Plus tard » : on mémorise ce qui a été refusé. LAN = numéro de build, GitHub = version publiée
+    // (deux espaces de valeurs distincts : refuser une version ne doit pas masquer les MAJ du réseau).
     func dismissUpdate() {
-        updateDismissedBuild = updatePeerBuild
         updateAvailable = false
-        config.dismissedUpdateBuild = updatePeerBuild
+        if updateIsRemote {
+            config.dismissedUpdateVersion = updateRemoteVersion
+        } else {
+            updateDismissedBuild = updatePeerBuild
+            config.dismissedUpdateBuild = updatePeerBuild
+        }
         configStore.save(config)
     }
 

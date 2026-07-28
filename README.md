@@ -21,7 +21,7 @@ ScanToPDF automates the processing of bulk document scans. Instead of manually a
 - **Image Corrections** — Automatic deskew and rotation to correct misfed scans
 - **Compression** — Reduces output file size without noticeable quality loss
 - **PDF/A** — Exports in the archival PDF/A format for long-term preservation
-- **Watermarking** (optional) — Applies a diagonal or custom watermark to pages
+- **Watermarking** (optional) — Stamps every page with either **text** or an **image** (PNG with transparency, JPEG, TIFF). Choose placement (diagonal, centred, top, bottom, tiled), opacity, and whether it is burned in or added as a removable "Filigrane" layer
 - **Network Export** (optional) — Can copy finished PDFs to a NAS or shared network drive
 - **Multi-Mac Sync** — Optional over-the-air app updates across Macs on the same local network
 
@@ -92,7 +92,9 @@ The app is configured through a `config.json` file stored in `/Users/Shared/Scan
   "deleteOriginals": false,
   "clean": true,
   "watermarkEnabled": false,
+  "watermarkType": "text",
   "watermarkText": "",
+  "watermarkImagePath": "",
   "watermarkOpacity": 20,
   "watermarkPosition": "diagonal",
   "watermarkHard": true,
@@ -124,9 +126,11 @@ The app is configured through a `config.json` file stored in `/Users/Shared/Scan
 | `deleteOriginals` | Delete source files (TIFF **and** PDF alike) after the result is produced. Off by default — originals are always kept | `false` |
 | `clean` | Clean temporary files after processing | `true` |
 | `watermarkEnabled` | Apply a watermark to each page | `false` |
-| `watermarkText` | Watermark text to display | `""` |
-| `watermarkOpacity` | Watermark opacity (0–100) | `20` |
-| `watermarkPosition` | Watermark position (`diagonal`, etc.) | `"diagonal"` |
+| `watermarkType` | `"text"` or `"image"` | `"text"` |
+| `watermarkText` | Watermark text (type `text`) | `""` |
+| `watermarkImagePath` | Absolute path to the watermark image — PNG transparency is preserved (type `image`) | `""` |
+| `watermarkOpacity` | Watermark opacity (0–100); lightens the text or image | `20` |
+| `watermarkPosition` | `diagonal`, `center`, `top`, `bottom` or `tile` | `"diagonal"` |
 | `watermarkHard` | Render watermark directly into the page (vs overlay) | `true` |
 | `networkEnabled` | Enable network/NAS export | `false` |
 | `nasHost` | NAS/SMB server hostname or IP | `""` |

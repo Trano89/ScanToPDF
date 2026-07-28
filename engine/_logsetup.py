@@ -8,8 +8,25 @@ import datetime
 from pathlib import Path
 
 
+KEEP_LOGS = 60   # nombre de journaux conservés PAR type (watcher/archivage) — au-delà, purge du plus ancien
+
+
+def _prune(log_dir: Path, prefix: str, keep: int = KEEP_LOGS):
+    """Un journal est créé à CHAQUE traitement : sans purge, le dossier grossit indéfiniment."""
+    try:
+        old = sorted(log_dir.glob(f"{prefix}_*.log"), key=lambda p: p.name)[:-keep]
+        for f in old:
+            try:
+                f.unlink()
+            except OSError:
+                pass
+    except OSError:
+        pass
+
+
 def init_logging(name: str, prefix: str, log_dir: Path) -> logging.Logger:
     log_dir.mkdir(parents=True, exist_ok=True)
+    _prune(log_dir, prefix)
     ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     logger = logging.getLogger(name)
     logger.setLevel(logging.DEBUG)

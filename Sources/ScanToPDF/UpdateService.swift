@@ -11,8 +11,11 @@ import CryptoKit
 // URLs pour les releases GitHub (source des MAU distantes).
 private enum GitHubRelease {
     static let apiURL = "https://api.github.com/repos/Trano89/ScanToPDF/releases/latest"
-    // Format attendu d'un tag : vMAJOR.MINOR.BUILD_NUMBER (ex. v1.0.285658).
-    static let tagRe = "^v[0-9]+\\.[0-9]+\\.(\\d+)$"
+    // Tag de release : « vMAJEUR.MINEUR.CORRECTIF » (ex. v1.0.8). On le compare à la VERSION de l'app
+    // (CFBundleShortVersionString), pas au numéro de build : le dernier composant d'un tag est un
+    // numéro de correctif (7), sans rapport avec le build horodaté (298309) — les comparer rendait la
+    // vérification GitHub muette en permanence.
+    static let tagRe = "^v[0-9]+\\.[0-9]+\\.[0-9]+$"
 }
 
 final class UpdateService {
@@ -21,7 +24,18 @@ final class UpdateService {
 
     private let nodeId: String
     private let onUpdateAvailable: (Int, String) -> Void
-    private let onRemoteUpdateAvailable: (Int) -> Void   // callback distinct pour les releases GitHub
+    private let onRemoteUpdateAvailable: (String) -> Void   // release GitHub : VERSION (ex. « 1.0.8 »)
+
+    // Comparaison de versions « MAJEUR.MINEUR.CORRECTIF » (1.0.10 > 1.0.9, contrairement à un tri texte).
+    static func isNewer(_ candidate: String, than current: String) -> Bool {
+        func parts(_ s: String) -> [Int] { s.split(separator: ".").map { Int($0.filter(\.isNumber)) ?? 0 } }
+        let a = parts(candidate), b = parts(current)
+        for i in 0..<max(a.count, b.count) {
+            let x = i < a.count ? a[i] : 0, y = i < b.count ? b[i] : 0
+            if x != y { return x > y }
+        }
+        return false
+    }
 
     private let queue = DispatchQueue(label: "scantopdf.update")
     private var listener: NWListener?
@@ -47,7 +61,7 @@ final class UpdateService {
 
     init(nodeId: String,
          onUpdateAvailable: @escaping (Int, String) -> Void,
-         onRemoteUpdateAvailable: @escaping (Int) -> Void) {
+         onRemoteUpdateAvailable: @escaping (String) -> Void) {
         self.nodeId = nodeId
         self.onUpdateAvailable = onUpdateAvailable
         self.onRemoteUpdateAvailable = onRemoteUpdateAvailable
@@ -63,13 +77,13 @@ final class UpdateService {
                 self?.refreshAdvertisement()
             }
         }
-        // Remote check activé par défaut : peut être désactivé via setRemoteUpdates(false).
-        setRemoteUpdates(true)
+        // La vérification GitHub est INDÉPENDANTE de la découverte réseau : elle est pilotée par
+        // setRemoteUpdates() depuis la config. (Auparavant forcée à true ici → le réglage était ignoré.)
     }
 
+    // Arrête la découverte LAN uniquement — la vérification GitHub, indépendante, garde son état.
     func stop() {
         refreshTask?.cancel(); refreshTask = nil
-        remoteCheckTask?.cancel(); remoteCheckTask = nil
         listener?.cancel(); browser?.cancel()
         listener = nil; browser = nil
         queue.async { self.updateTarget = nil }
@@ -84,6 +98,7 @@ final class UpdateService {
     // Active/désactive uniquement la vérification distante GitHub.
     // Utile quand networkEnabled passe de false → true (le service est redémarré, mais on veut garder le remote check activé par défaut).
     func setRemoteUpdates(_ enabled: Bool) {
+        remoteCheckTask?.cancel(); remoteCheckTask = nil   // jamais deux boucles en parallèle
         if enabled {
             remoteCheckTask = Task { [weak self] in
                 while !Task.isCancelled {
@@ -224,17 +239,16 @@ final class UpdateService {
             guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let tagName = json["tag_name"] as? String else { return }
 
-            // Extraire BUILD_NUMBER du tag « vMAJOR.MINOR.BUILD » via NSRegularExpression.
+            // Valider la forme du tag « vMAJEUR.MINEUR.CORRECTIF », puis comparer à NOTRE version.
             guard let regex = try? NSRegularExpression(pattern: GitHubRelease.tagRe),
-                  let match = regex.firstMatch(in: tagName, range: NSRange(tagName.startIndex..., in: tagName)),
-                  let buildRange = Range(match.range(at: 1), in: tagName),
-                  let remoteBuild = Int(tagName[buildRange]) else { return }
+                  regex.firstMatch(in: tagName, range: NSRange(tagName.startIndex..., in: tagName)) != nil
+            else { return }
+            let remoteVersion = String(tagName.dropFirst())   // « v1.0.8 » → « 1.0.8 »
 
-            // Notifier si le build distant est strictement supérieur.
-            if remoteBuild > AppVersion.build {
+            if Self.isNewer(remoteVersion, than: AppVersion.short) {
                 queue.async { [weak self] in
                     guard let self else { return }
-                    self.onRemoteUpdateAvailable(remoteBuild)
+                    self.onRemoteUpdateAvailable(remoteVersion)
                 }
             }
         } catch {
@@ -328,11 +342,11 @@ final class UpdateService {
         guard let target = queue.sync(execute: { updateTarget }) else { return "Aucun Mac source détecté." }
         let conn = NWConnection(to: target.endpoint, using: tlsParameters())
         let ready: Bool = await withCheckedContinuation { cont in
-            var done = false
+            let once = ResumeGuard()
             conn.stateUpdateHandler = { state in
                 switch state {
-                case .ready: if !done { done = true; cont.resume(returning: true) }
-                case .failed, .cancelled: if !done { done = true; cont.resume(returning: false) }
+                case .ready: if once.claim() { cont.resume(returning: true) }
+                case .failed, .cancelled: if once.claim() { cont.resume(returning: false) }
                 default: break
                 }
             }
@@ -455,9 +469,9 @@ final class UpdateService {
         var buf = Data()
         while buf.count < n {
             let chunk: Data = try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Data, Error>) in
-                var resumed = false
+                let once = ResumeGuard()
                 conn.receive(minimumIncompleteLength: 1, maximumLength: n - buf.count) { data, _, isComplete, error in
-                    if resumed { return }; resumed = true
+                    guard once.claim() else { return }
                     if let error = error { cont.resume(throwing: error); return }
                     if let data = data, !data.isEmpty { cont.resume(returning: data) }
                     else if isComplete { cont.resume(throwing: SyncError.closed) }
@@ -540,3 +554,16 @@ final class UpdateService {
 }
 
 enum SyncError: Error { case closed }
+
+// Garde-fou : une continuation ne doit être reprise QU'UNE fois, or les gestionnaires de Network
+// peuvent être rappelés (état puis annulation). Type référence → capture sûre en concurrence stricte.
+final class ResumeGuard: @unchecked Sendable {
+    private let lock = NSLock()
+    private var used = false
+    func claim() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if used { return false }
+        used = true
+        return true
+    }
+}

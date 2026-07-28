@@ -26,9 +26,11 @@ struct AppConfig: Codable {
     // Suppression des originaux : opt-in EXPLICITE, OFF par défaut. Les originaux (TIFF ET PDF) sont
     // conservés dans le sous-dossier projet ; activé, ils sont supprimés à l'identique (jamais le résultat).
     var deleteOriginals: Bool = false
-    // Filigrane apposé sur chaque page :
+    // Filigrane apposé sur chaque page (TEXTE ou IMAGE au choix) :
     var watermarkEnabled: Bool = false           // activer le filigrane
+    var watermarkType: String = "text"           // « text » = texte, « image » = fichier PNG/JPEG
     var watermarkText: String = ""               // texte du filigrane (ex. « ARCHIVES FVJC »)
+    var watermarkImagePath: String = ""          // chemin absolu de l'image (type « image »)
     var watermarkPosition: String = "diagonal"   // diagonal / center / top / bottom / tile
     var watermarkOpacity: Int = 20               // 0–100 (plus élevé = plus visible/sombre)
     var watermarkHard: Bool = true               // true = fusionné (non supprimable) ; false = calque OCG
@@ -36,7 +38,8 @@ struct AppConfig: Codable {
     var startAtLogin: Bool = true    // démarrer avec le système (login item)
     var networkEnabled: Bool = true  // découverte réseau + invitation de mise à jour
     var remoteUpdateEnabled: Bool = true  // vérification périodique des releases GitHub
-    var dismissedUpdateBuild: Int = 0 // build refusé via « Plus tard » (ne plus reproposer)
+    var dismissedUpdateBuild: Int = 0 // build LAN refusé via « Plus tard » (ne plus reproposer)
+    var dismissedUpdateVersion: String = ""  // version GitHub refusée via « Plus tard » (ex. « 1.0.8 »)
     // Export du résultat vers le NAS (Synology). Le dossier projet est classé selon son nom
     // (« Eg.w.O0.… » → Eg/w/O0/) sur le NAS SMB monté (priorité), sinon dans le dossier Synology Drive.
     var exportEnabled: Bool = false  // copier le dossier résultat vers le NAS / Synology Drive
@@ -69,13 +72,17 @@ struct AppConfig: Codable {
         notify = d(.notify, notify)
         deleteOriginals = d(.deleteOriginals, deleteOriginals)
         watermarkEnabled = d(.watermarkEnabled, watermarkEnabled)
+        watermarkType = d(.watermarkType, watermarkType)
         watermarkText = d(.watermarkText, watermarkText)
+        watermarkImagePath = d(.watermarkImagePath, watermarkImagePath)
         watermarkPosition = d(.watermarkPosition, watermarkPosition)
         watermarkOpacity = max(0, min(100, d(.watermarkOpacity, watermarkOpacity)))
         watermarkHard = d(.watermarkHard, watermarkHard)
         startAtLogin = d(.startAtLogin, startAtLogin)
         networkEnabled = d(.networkEnabled, networkEnabled)
+        remoteUpdateEnabled = d(.remoteUpdateEnabled, remoteUpdateEnabled)   // sinon le réglage ne survivait pas au redémarrage
         dismissedUpdateBuild = d(.dismissedUpdateBuild, dismissedUpdateBuild)
+        dismissedUpdateVersion = d(.dismissedUpdateVersion, dismissedUpdateVersion)
         exportEnabled = d(.exportEnabled, exportEnabled)
         nasHost = d(.nasHost, nasHost)
         nasShare = d(.nasShare, nasShare)
@@ -91,10 +98,11 @@ struct AppConfig: Codable {
 enum AppVersion {
     static var build: Int { Int(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "0") ?? 0 }
     static var short: String { Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?" }
-    // Révision git compilée dans le binaire (via -DAPP_GIT_COUNT / -DAPP_GIT_SHA dans build_app.sh).
-    static var gitCount: Int { Int(_gitCount) ?? 0 }
-    static var gitSha: String { _gitSha.isEmpty ? "?" : _gitSha }
-    static var revision: String { "\(_gitCount):\(_gitSha.isEmpty ? "?" : _gitSha)" }
+    // Révision git, écrite dans l'Info.plist par build_app.sh (« <count>:<sha> »). Elle passait autrefois
+    // par « -D NOM=valeur », ce qui n'existe pas en Swift (un flag est présent ou absent, jamais valué) :
+    // la valeur était donc toujours vide et la révision jamais affichée.
+    static var revision: String { Bundle.main.infoDictionary?["SCGitRevision"] as? String ?? "" }
+    static var hasRevision: Bool { !revision.isEmpty && revision != "0:none" }
 }
 
 // Emplacements runtime. Base PARTAGÉE /Users/Shared/ScanToPDF (accessible à tous les comptes du Mac),

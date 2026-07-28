@@ -13,15 +13,14 @@ PROJ="$(pwd)"
 
 APP_NAME="ScanToPDF"
 BUNDLE_ID="com.antonin.scantopdf"
-VERSION="1.0.7"
+VERSION="1.0.8"
 # Numéro de build COURT et monotone : minutes écoulées depuis 2026-01-01 UTC (≈ 6 chiffres, ex. 266401).
-# Croissant dans le temps → comparable entre Mac pour la mise à jour réseau. (1767225600 = 2026-01-01 00:00 UTC)
-# Build number : minutes écoulées depuis 2026-01-01 UTC (≈ 6 chiffres, ex. 266401).
 # Croissant dans le temps → comparable entre Mac pour la mise à jour réseau. (1767225600 = 2026-01-01 00:00 UTC)
 BUILD=$(( ( $(date +%s) - 1767225600 ) / 60 ))
 [ "$BUILD" -ge 1 ] 2>/dev/null || BUILD=1     # garde-fou si l'horloge est antérieure à l'époque
 
-# Révision git (sha court + commit count) compilée dans le binaire via -D.
+# Révision git (commit count + sha court) → clé SCGitRevision de l'Info.plist, lue par AppVersion.
+# (Elle passait par « -D NOM=valeur », inopérant en Swift : un flag y est présent ou absent, jamais valué.)
 GIT_REV=$(git rev-parse --short HEAD 2>/dev/null || echo "none")
 GIT_COUNT=$(git rev-list --count HEAD 2>/dev/null || echo "0")
 OUT_DIR="${1:-/Applications}"
@@ -43,17 +42,13 @@ need dylibbundler dylibbundler
 [ -x "$BREW/bin/unpaper" ]   || { echo "❌ unpaper arm64 requis (brew install unpaper)"; exit 1; }
 
 # ── 1) Compilation Swift ─────────────────────────────────────────────────────
-echo "→ [1/8] Compilation Swift (release, arm64)…"
-BUILD_ARGS=(
-  -Xswiftc -D -Xswiftc "APP_GIT_COUNT=$GIT_COUNT"
-  -Xswiftc -D -Xswiftc "APP_GIT_SHA='$GIT_REV'"
-)
-swift build -c release --arch arm64 "${BUILD_ARGS[@]}"
-BIN="$(swift build -c release --arch arm64 "${BUILD_ARGS[@]}" --show-bin-path)/$APP_NAME"
+echo "→ [1/9] Compilation Swift (release, arm64)…"
+swift build -c release --arch arm64
+BIN="$(swift build -c release --arch arm64 --show-bin-path)/$APP_NAME"
 [ -f "$BIN" ] || { echo "❌ Binaire introuvable : $BIN"; exit 1; }
 
 # ── 2) Squelette du bundle ───────────────────────────────────────────────────
-echo "→ [2/8] Assemblage du bundle…"
+echo "→ [2/9] Assemblage du bundle…"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$RES/bin" "$RES/lib" "$RES/share" "$RES/gs-lib" "$RES/engine"
 cp "$BIN" "$APP/Contents/MacOS/$APP_NAME"
@@ -69,7 +64,7 @@ if [ -d "$VENV_SRC/lib" ]; then
 fi
 VENV_SP="$VENV_SRC/lib/python${PYMINOR}/site-packages"
 
-echo "→ [3/8] Téléchargement de CPython relocalisable ($PYMINOR)…"
+echo "→ [3/9] Téléchargement de CPython relocalisable ($PYMINOR)…"
 REL_JSON="$(curl -fsSL https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest)"
 # NB : dans le JSON de l'API, le « + » de la version est encodé « %2B » → on accepte les deux.
 PY_URL="$(printf '%s' "$REL_JSON" | grep -oE "https://[^\"]*cpython-${PYMINOR}\.[0-9]+(%2B|\+)[0-9]+-aarch64-apple-darwin-install_only\.tar\.gz" | head -1 || true)"
@@ -81,7 +76,7 @@ cp -R "$TMP/python/." "$RES/python/"
 PYBIN="$RES/python/bin/python3"
 DEST_SP="$RES/python/lib/python${PYMINOR}/site-packages"
 
-echo "→ [4/8] Paquets Python (ocrmypdf, pikepdf, pillow, watchdog)…"
+echo "→ [4/9] Paquets Python (ocrmypdf, pikepdf, pillow, watchdog)…"
 if [ -f "$VENV_SP/ocrmypdf/__init__.py" ]; then
   # Chemin HORS-LIGNE fiable : on réutilise les paquets déjà installés du venv (wheels auto-contenues,
   # dylibs dans PIL/.dylibs et pikepdf/.dylibs → aucune dépendance Homebrew). ABI cp${PYMINOR/./} compatible.
@@ -100,7 +95,7 @@ find "$RES/python" -depth -type d -name "test" -prune -exec rm -rf {} + 2>/dev/n
 find "$RES/python" -depth -type d -name "tests" -prune -exec rm -rf {} + 2>/dev/null || true
 
 # ── 5) Binaires natifs arm64 + ressources ────────────────────────────────────
-echo "→ [5/8] Copie des binaires natifs (arm64) + ressources…"
+echo "→ [5/9] Copie des binaires natifs (arm64) + ressources…"
 for t in tesseract gs unpaper pngquant jbig2; do
   cp -L "$BREW/bin/$t" "$RES/bin/$t"
 done
@@ -157,6 +152,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
   <key>CFBundleVersion</key><string>$BUILD</string>
+  <key>SCGitRevision</key><string>$GIT_COUNT:$GIT_REV</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
