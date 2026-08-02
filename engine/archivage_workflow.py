@@ -193,9 +193,14 @@ ISAD_CONTEXT = str(_CFG.get("isadContext", ISAD_CONTEXT_DEFAULT)).strip()
 ISAD_MODEL = str(_CFG.get("isadModel", "qwen3.5:9b")).strip() or "qwen3.5:9b"
 ISAD_HOST  = str(_CFG.get("isadHost", "http://localhost:11434")).strip().rstrip("/") or "http://localhost:11434"
 # Bornes : un OCR de gros document ne doit pas gonfler la requête au LLM ni son temps de réponse.
-ISAD_MAX_CHARS   = 40000    # caractères de texte OCR envoyés au modèle (échantillonnés sur TOUT le document)
-ISAD_TIMEOUT     = 180      # secondes d'attente max de la réponse Ollama (best-effort, non bloquant pour le PDF)
+# Budget de texte UTILE (le texte est compacté avant échantillonnage : ces 20 000 caractères sont du
+# vrai texte, là où 40 000 caractères bruts n'en contenaient qu'un millier). Au-delà, le temps de
+# génération croît sans gain de justesse — mesuré sur ce fonds.
+ISAD_MAX_CHARS   = 20000
+ISAD_TIMEOUT     = 600      # secondes d'attente max (inclut le chargement à froid du modèle, ~40 s)
+ISAD_MAX_TOKENS  = 1500     # réponse bornée : huit champs n'en demandent pas davantage
 ISAD_START_WAIT  = 45       # secondes laissées à Ollama pour répondre après un démarrage automatique
+ISAD_MIN_TEXT    = 400      # en deçà, l'OCR n'a rien rendu d'exploitable → la fiche est signalée comme fragile
 
 # Ghostscript : binaire bundlé fourni par l'app (SCANTOPDF_GS), repli Homebrew.
 if os.environ.get("SCANTOPDF_GS") and Path(os.environ["SCANTOPDF_GS"]).exists():
@@ -832,6 +837,18 @@ def export_result(project_dir: Path, project_name: str, logger: logging.Logger):
 # ─────────────────────────────────────────────────────────────
 # FICHE ISAD(G) — extraction du texte OCR + résumé par LLM local (Ollama)
 # ─────────────────────────────────────────────────────────────
+def _normalize_text(text: str) -> str:
+    """Compacte le texte extrait. Le rendu texte d'un PDF numérisé est massivement fait d'espaces de
+    positionnement : jusqu'à 97,5 % du volume sur ce fonds (1 807 213 caractères pour 64 994 utiles).
+    Sans compactage, le budget envoyé au modèle part en blancs — environ mille caractères de texte réel
+    sur quarante mille — et la fiche se retrouve sans matière à décrire."""
+    text = text.replace("\r", "\n")
+    text = re.sub(r"[ \t   ]+", " ", text)   # suites d'espaces → un seul
+    text = re.sub(r" *\n *", "\n", text)                     # espaces en bord de ligne
+    text = re.sub(r"\n{3,}", "\n\n", text)                   # lignes vides en série
+    return text.strip()
+
+
 def _text_is_usable(text: str) -> bool:
     """Le texte extrait est-il RÉELLEMENT lisible ? Quand la police embarquée n'expose pas de table
     ToUnicode, un extracteur peut rendre « (cid:83)(cid:111)… » là où il y a « Sommaire » : du charabia,
@@ -878,11 +895,12 @@ def _extract_with_pdfminer(pdf_path: Path, logger: logging.Logger) -> str:
 def extract_pdf_text(pdf_path: Path, logger: logging.Logger) -> str:
     """Texte de la couche OCR du PDF final, avec contrôle de LISIBILITÉ. Retourne '' si rien
     d'exploitable (PDF purement image sans OCR) — l'appelant ne produira alors pas de fiche."""
-    candidates = [("Ghostscript", _extract_with_ghostscript(pdf_path, logger))]
+    candidates = [("Ghostscript", _normalize_text(_extract_with_ghostscript(pdf_path, logger)))]
     if _text_is_usable(candidates[0][1]):
+        logger.info(f"Texte du document extrait par Ghostscript ({len(candidates[0][1])} caractères utiles).")
         return candidates[0][1]
     logger.info("Extraction Ghostscript inexploitable — essai de pdfminer.")
-    candidates.append(("pdfminer", _extract_with_pdfminer(pdf_path, logger)))
+    candidates.append(("pdfminer", _normalize_text(_extract_with_pdfminer(pdf_path, logger))))
     for name, txt in candidates:
         if _text_is_usable(txt):
             logger.info(f"Texte du document extrait par {name} ({len(txt)} caractères).")
@@ -969,9 +987,16 @@ def ensure_ollama(logger: logging.Logger) -> bool:
     return False
 
 
-def _pdf_extent(pdf_path: Path) -> tuple:
-    """(nombre de pages, « L × H cm ») du PDF final. Ces données sont MESURÉES : les laisser deviner au
-    modèle donnait « 1 dossier de classement » pour une brochure de 18 pages."""
+PAPER_FORMATS = (("A3", 29.7, 42.0), ("A4", 21.0, 29.7), ("A5", 14.8, 21.0),
+                 ("Letter", 21.6, 27.9), ("Legal", 21.6, 35.6))
+
+
+def _pdf_extent(pdf_path: Path, from_pdf: bool) -> tuple:
+    """(nombre de pages, dimensions) du PDF final. Le nombre de pages est toujours sûr.
+    Les DIMENSIONS ne le sont pas : les images de ce fonds sont photographiées et ne portent aucune
+    résolution, si bien que la page du PDF mesure « 29,3 × 43,9 cm » — un format qui n'existe pas.
+    On ne transmet donc une dimension que si elle est CRÉDIBLE : source déjà en PDF, ou correspondance
+    avec un format papier courant. Mieux vaut une notice muette qu'une notice fausse."""
     try:
         import pikepdf
         with pikepdf.Pdf.open(str(pdf_path)) as pdf:
@@ -979,9 +1004,13 @@ def _pdf_extent(pdf_path: Path) -> tuple:
             box = pdf.pages[0].mediabox
             w = (float(box[2]) - float(box[0])) / 72 * 2.54
             h = (float(box[3]) - float(box[1])) / 72 * 2.54
-        return pages, f"{w:.1f} × {h:.1f} cm".replace(".", ",")
     except Exception:
         return 0, ""
+    fmt = next((n for n, a, b in PAPER_FORMATS if abs(w - a) < 1.0 and abs(h - b) < 1.0), "")
+    if not (from_pdf or fmt):
+        return pages, ""
+    size = f"{w:.1f} × {h:.1f} cm".replace(".", ",")
+    return pages, f"{size} ({fmt})" if fmt else size
 
 
 def _isad_sample(text: str, budget: int) -> str:
@@ -1017,6 +1046,9 @@ def _isad_prompt(ocr_text: str, project_name: str, fallback_date: str = "",
         lines.append(f"- Nombre de pages : {facts['pages']}")
     if facts.get("size"):
         lines.append(f"- Format des pages : {facts['size']}")
+    else:
+        lines.append("- Format des pages : non mesurable (numérisation sans résolution fiable) — "
+                     "n'indique AUCUNE dimension dans la fiche.")
     if fallback_date:
         lines.append(f"- Date de création du fichier d'origine : {fallback_date}")
     facts_block = ("DONNÉES FACTUELLES (mesurées sur le fichier — reprends-les telles quelles, "
@@ -1052,9 +1084,10 @@ def _isad_prompt(ocr_text: str, project_name: str, fallback_date: str = "",
         "DATE: une date au format AAAA-MM-JJ, ou une plage « AAAA-MM-JJ - AAAA-MM-JJ » si le document "
         "couvre plusieurs dates. Si seule l'année est connue, écris AAAA. Si inconnu, « Inconnu ».\n"
         + date_fallback +
-        "ETENDUE: étendue et support (ISAD 3.1.5). Reprends OBLIGATOIREMENT le nombre de pages et le "
-        "format des DONNÉES FACTUELLES, sous la forme « <nature du document> de N pages, L × H cm » "
-        "(ex. « 1 brochure de 18 pages, 21,0 × 29,7 cm »).\n"
+        "ETENDUE: étendue et support (ISAD 3.1.5). Reprends OBLIGATOIREMENT le nombre de pages des "
+        "DONNÉES FACTUELLES, sous la forme « <nature du document> de N pages », suivi du format "
+        "UNIQUEMENT s'il y est fourni (ex. « 1 brochure de 18 pages, 21,0 × 29,7 cm »). Si le format "
+        "est annoncé non mesurable, n'invente aucune dimension.\n"
         "HISTOIRE: histoire archivistique (ISAD 3.2.3) : origine, producteur, contexte de création. "
         "2 à 4 phrases.\n"
         "PORTEE: portée et contenu (ISAD 3.3.1) : de quoi traite CE document, points saillants relevés "
@@ -1111,7 +1144,8 @@ def _ollama_generate(prompt: str, logger: logging.Logger) -> str:
         # du modèle : certains Modelfile imposent presence_penalty 1.5, qui pousse à produire des mots
         # NOUVEAUX — exactement le contraire de ce qu'on veut (le modèle inventait des communes).
         "options": {"temperature": 0.1, "num_ctx": num_ctx, "top_p": 0.9, "top_k": 40,
-                    "presence_penalty": 0, "frequency_penalty": 0, "repeat_penalty": 1.0},
+                    "presence_penalty": 0, "frequency_penalty": 0, "repeat_penalty": 1.0,
+                    "num_predict": ISAD_MAX_TOKENS},
     }
     logger.info(f"Fiche ISAD : {len(prompt)} caractères envoyés, fenêtre de contexte {num_ctx} jetons.")
     try:
@@ -1180,12 +1214,14 @@ def _isad_filter_places(value: str, ocr_text: str, logger: logging.Logger) -> st
     if value.strip().lower().startswith("inconnu"):
         return "Inconnu"          # absence déclarée : rien à filtrer
     hay = norm(ocr_text)
-    kept, dropped = [], []
+    kept, dropped, seen = [], [], set()
     for raw in re.split(r"[,;]", value):
         item = re.sub(r"\(.*?\)", "", raw).strip(" .;")
-        if not item:
+        key = norm(item)
+        if not item or key in seen:      # un même lieu revient souvent deux fois dans la liste
             continue
-        (kept if norm(item) and norm(item) in hay else dropped).append(item)
+        seen.add(key)
+        (kept if key and key in hay else dropped).append(item)
     if dropped:
         logger.info(f"Fiche ISAD : {len(dropped)} lieu(x) écarté(s) car absents du texte — "
                     f"{', '.join(dropped[:6])}")
@@ -1233,9 +1269,18 @@ def write_isad_sidecar(final_pdf: Path, ocr_text: str, project_name: str, logger
     if not ocr_text.strip():
         logger.info("Fiche ISAD : aucune couche texte exploitable dans le PDF — fiche non générée.")
         return
-    pages, size = _pdf_extent(final_pdf)
+    pages, size = _pdf_extent(final_pdf, from_pdf)
     facts = {"pages": pages or None, "size": size or None,
              "support": "document PDF numérique" if from_pdf else "numérisation de documents papier"}
+    # Signal d'honnêteté : sous ce seuil, l'OCR n'a presque rien rendu (page de titre seule, écriture
+    # manuscrite, scan illisible) et la description ne peut pas être solide. On le DIT, plutôt que de
+    # livrer une notice assurée bâtie sur trois lignes de texte.
+    thin_note = ""
+    if len(ocr_text.strip()) < ISAD_MIN_TEXT:
+        thin_note = (f"Texte reconnu très limité ({len(ocr_text.strip())} caractères) — "
+                     f"description peu fiable, à reprendre manuellement.\n")
+        logger.warning(f"Fiche ISAD : seulement {len(ocr_text.strip())} caractères de texte exploitable "
+                       f"pour « {project_name} » — description peu fiable.")
     prompt = _isad_prompt(ocr_text, project_name, fallback_date, facts)
     logger.info(f"Fiche ISAD : interrogation du modèle « {ISAD_MODEL} » via {ISAD_HOST}…")
     body = _ollama_generate(prompt, logger)
@@ -1264,6 +1309,7 @@ def write_isad_sidecar(final_pdf: Path, ocr_text: str, project_name: str, logger
               f"Générée   : automatiquement le {stamp}\n"
               f"Modèle    : {ISAD_MODEL}\n"
               + (f"Remarque  : {date_note}" if date_note else "")
+              + (f"⚠ Alerte  : {thin_note}" if thin_note else "")
               + "Relecture : description produite par une machine — à vérifier avant publication.\n"
               + "═" * ISAD_WIDTH + "\n\n")
     try:
