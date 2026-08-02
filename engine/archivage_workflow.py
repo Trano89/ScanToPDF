@@ -832,19 +832,23 @@ def export_result(project_dir: Path, project_name: str, logger: logging.Logger):
 # ─────────────────────────────────────────────────────────────
 # FICHE ISAD(G) — extraction du texte OCR + résumé par LLM local (Ollama)
 # ─────────────────────────────────────────────────────────────
-def extract_pdf_text(pdf_path: Path, logger: logging.Logger) -> str:
-    """Texte de la couche OCR du PDF final. pdfminer.six si présent (meilleure extraction),
-    sinon repli sur Ghostscript txtwrite (TOUJOURS bundlé). Retourne '' si rien n'est extractible
-    (PDF purement image sans OCR) — l'appelant décidera alors de ne pas produire de fiche."""
-    # 1) Tentative pdfminer.six (dépendance optionnelle, absente du bundle par défaut).
-    try:
-        from pdfminer.high_level import extract_text  # type: ignore
-        txt = extract_text(str(pdf_path)) or ""
-        if txt.strip():
-            return txt
-    except Exception as exc:
-        logger.debug(f"pdfminer indisponible ou échec ({exc}) — repli Ghostscript txtwrite.")
-    # 2) Repli Ghostscript : device txtwrite → fichier texte temporaire.
+def _text_is_usable(text: str) -> bool:
+    """Le texte extrait est-il RÉELLEMENT lisible ? Quand la police embarquée n'expose pas de table
+    ToUnicode, un extracteur peut rendre « (cid:83)(cid:111)… » là où il y a « Sommaire » : du charabia,
+    illisible pour un humain comme pour un modèle — qui se rabat alors sur le contexte et décrit
+    n'importe quoi. On mesure donc la lisibilité avant de transmettre quoi que ce soit."""
+    if not text or len(text.strip()) < 200:
+        return False
+    if text.count("(cid:") > 20:                       # codes de glyphes non résolus
+        return False
+    if sum(1 for c in text if c.isalpha() or c.isspace()) / len(text) < 0.6:
+        return False
+    words = text.split()
+    return not words or sum(len(w) for w in words) / len(words) <= 25
+
+
+def _extract_with_ghostscript(pdf_path: Path, logger: logging.Logger) -> str:
+    """Ghostscript txtwrite : toujours bundlé, et fiable sur les PDF que l'application produit."""
     try:
         TEMP_DIR.mkdir(parents=True, exist_ok=True)
         out_txt = TEMP_DIR / f"{pdf_path.stem}_ocrtext.txt"
@@ -858,6 +862,37 @@ def extract_pdf_text(pdf_path: Path, logger: logging.Logger) -> str:
     except Exception as exc:
         logger.debug(f"Extraction texte (Ghostscript) échouée : {exc}")
     return ""
+
+
+def _extract_with_pdfminer(pdf_path: Path, logger: logging.Logger) -> str:
+    """pdfminer.six, s'il est présent. Utilisé en REPLI seulement : sur les PDF de ce pipeline il rend
+    fréquemment les codes de glyphes bruts au lieu du texte."""
+    try:
+        from pdfminer.high_level import extract_text  # type: ignore
+        return extract_text(str(pdf_path)) or ""
+    except Exception as exc:
+        logger.debug(f"pdfminer indisponible ou échec : {exc}")
+        return ""
+
+
+def extract_pdf_text(pdf_path: Path, logger: logging.Logger) -> str:
+    """Texte de la couche OCR du PDF final, avec contrôle de LISIBILITÉ. Retourne '' si rien
+    d'exploitable (PDF purement image sans OCR) — l'appelant ne produira alors pas de fiche."""
+    candidates = [("Ghostscript", _extract_with_ghostscript(pdf_path, logger))]
+    if _text_is_usable(candidates[0][1]):
+        return candidates[0][1]
+    logger.info("Extraction Ghostscript inexploitable — essai de pdfminer.")
+    candidates.append(("pdfminer", _extract_with_pdfminer(pdf_path, logger)))
+    for name, txt in candidates:
+        if _text_is_usable(txt):
+            logger.info(f"Texte du document extrait par {name} ({len(txt)} caractères).")
+            return txt
+    # Aucun extracteur lisible : on renvoie le plus long, l'appelant jugera (peut rester vide).
+    best = max((t for _, t in candidates), key=len, default="")
+    if best.strip():
+        logger.warning("Texte extrait peu lisible (police sans table ToUnicode ?) — "
+                       "la fiche ISAD risque d'être imprécise.")
+    return best
 
 
 def _pdf_creation_date(pdf_path: Path, logger: logging.Logger) -> str:
@@ -990,13 +1025,29 @@ def _isad_prompt(ocr_text: str, project_name: str, fallback_date: str = "",
     date_fallback = (
         f"Si le TEXTE OCR ne porte AUCUNE date, et seulement dans ce cas, utilise la date de création "
         f"du fichier d'origine : {fallback_date}.\n" if fallback_date else "")
+    # ORDRE DU PROMPT — il est déterminant. Le contexte du fonds, court et bien structuré, captait
+    # l'attention du modèle au détriment du document : la fiche paraphrasait le contexte (« listes de
+    # membres, coupures de presse… ») au lieu de décrire la pièce. On place donc le contexte en amont
+    # comme simple aide, le DOCUMENT juste avant la tâche, et les consignes EN DERNIER — c'est ce que
+    # le modèle a le plus « frais » au moment de rédiger.
     return (
-        "Tu es archiviste.\n\n"
-        + (ISAD_CONTEXT + "\n\n" if ISAD_CONTEXT else "")
-        + "À partir du TEXTE OCR d'un document numérisé (parfois bruité par l'OCR), "
-        "rédige une fiche descriptive selon la norme ISAD(G), en français, factuelle et concise. "
-        "N'invente rien : si une information est absente ou illisible, écris « Inconnu ». "
-        "Réponds UNIQUEMENT avec les champs ci-dessous, dans cet ordre exact, chacun sur sa ou ses "
+        "Tu es archiviste. Tu dois décrire UN document précis, fourni plus bas.\n\n"
+        + ("<<< CONTEXTE DU FONDS — aide à l'interprétation UNIQUEMENT >>>\n"
+           "Ce contexte explique les sigles, l'organisation et le vocabulaire du fonds. Il ne décrit "
+           "PAS le document à décrire et ne doit JAMAIS servir de source : n'y puise aucun élément de "
+           "description, ne recopie pas ses exemples comme s'ils figuraient dans le document.\n\n"
+           + ISAD_CONTEXT + "\n<<< FIN DU CONTEXTE >>>\n\n" if ISAD_CONTEXT else "")
+        + facts_block
+        + "<<< TEXTE DU DOCUMENT À DÉCRIRE (issu de la reconnaissance optique) >>>\n"
+        + snippet
+        + "\n<<< FIN DU DOCUMENT >>>\n\n"
+        "TÂCHE : rédige la fiche descriptive de CE document selon la norme ISAD(G), en français, "
+        "factuelle et concise.\n"
+        "Règles impératives :\n"
+        "- Tout ce que tu écris doit provenir du TEXTE DU DOCUMENT ci-dessus ou des DONNÉES FACTUELLES.\n"
+        "- N'invente rien : si une information est absente ou illisible, écris « Inconnu ».\n"
+        "- N'emploie un terme du contexte que s'il figure réellement dans le document.\n"
+        "- Réponds UNIQUEMENT avec les champs ci-dessous, dans cet ordre exact, chacun sur sa ou ses "
         "lignes, sans commentaire ni Markdown.\n\n"
         "DATE: une date au format AAAA-MM-JJ, ou une plage « AAAA-MM-JJ - AAAA-MM-JJ » si le document "
         "couvre plusieurs dates. Si seule l'année est connue, écris AAAA. Si inconnu, « Inconnu ».\n"
@@ -1006,17 +1057,15 @@ def _isad_prompt(ocr_text: str, project_name: str, fallback_date: str = "",
         "(ex. « 1 brochure de 18 pages, 21,0 × 29,7 cm »).\n"
         "HISTOIRE: histoire archivistique (ISAD 3.2.3) : origine, producteur, contexte de création. "
         "2 à 4 phrases.\n"
-        "PORTEE: portée et contenu (ISAD 3.3.1) : de quoi traite le document, points saillants. "
-        "3 à 6 phrases.\n"
-        "SUJETS: mots-clés thématiques séparés par des virgules.\n"
+        "PORTEE: portée et contenu (ISAD 3.3.1) : de quoi traite CE document, points saillants relevés "
+        "dans son texte. 3 à 6 phrases.\n"
+        "SUJETS: mots-clés thématiques, séparés par des virgules — tirés du contenu du document.\n"
         "LIEUX: noms de lieux, séparés par des virgules. N'indique QUE des noms LITTÉRALEMENT présents "
-        "dans le texte ci-dessous : ne complète jamais par des communes plausibles ou connues par "
-        "ailleurs. Aucun lieu dans le texte → « Inconnu ».\n"
+        "dans le texte du document : ne complète jamais par des communes plausibles ou connues par "
+        "ailleurs. Aucun lieu dans le document → « Inconnu ».\n"
         "GENRE: type documentaire (ex. brochure, procès-verbal, correspondance, photographie).\n"
-        "MATIERES: points d'accès matières / entités nommées (organisations, événements), "
-        "séparés par des virgules.\n\n"
-        + facts_block
-        + f"TEXTE OCR :\n{snippet}\n"
+        "MATIERES: points d'accès matières / entités nommées (organisations, événements) citées dans "
+        "le document, séparées par des virgules.\n"
     )
 
 
@@ -1035,6 +1084,15 @@ def _ollama_generate(prompt: str, logger: logging.Logger) -> str:
                                      headers={"Content-Type": "application/json"}, method="POST")
         with urllib.request.urlopen(req, timeout=ISAD_TIMEOUT) as resp:
             data = json.loads(resp.read().decode("utf-8", errors="replace"))
+        # Nombre RÉEL de jetons du prompt : seul moyen de savoir si la fenêtre a suffi (une troncature
+        # côté Ollama est silencieuse et donne une fiche qui décrit un document vu en morceaux).
+        used = int(data.get("prompt_eval_count", 0) or 0)
+        ctx = int(body.get("options", {}).get("num_ctx", 0) or 0)
+        if used and ctx and used >= ctx:
+            logger.warning(f"Fiche ISAD : prompt de {used} jetons pour une fenêtre de {ctx} — "
+                           f"le document a pu être tronqué.")
+        elif used:
+            logger.info(f"Fiche ISAD : {used} jetons de prompt (fenêtre {ctx}).")
         return str(data.get("response", "")).strip()
 
     # Ollama plafonne la fenêtre de contexte à 4096 jetons par DÉFAUT, quelle que soit la capacité du
@@ -1119,6 +1177,8 @@ def _isad_filter_places(value: str, ocr_text: str, logger: logging.Logger) -> st
         s = "".join(c for c in s if unicodedata.category(c) != "Mn")
         return re.sub(r"[^a-z0-9]+", "", s)
 
+    if value.strip().lower().startswith("inconnu"):
+        return "Inconnu"          # absence déclarée : rien à filtrer
     hay = norm(ocr_text)
     kept, dropped = [], []
     for raw in re.split(r"[,;]", value):
