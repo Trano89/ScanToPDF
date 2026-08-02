@@ -40,6 +40,47 @@ struct AppConfig: Codable {
     var isadEnabled: Bool = false               // générer la fiche texte ISAD à côté du PDF
     var isadModel: String = "qwen3.5:9b"        // modèle Ollama interrogé (doit être « pull » au préalable)
     var isadHost: String = "http://localhost:11434"  // URL de base de l'API Ollama locale
+    // Contexte du fonds transmis au modèle, éditable dans les préférences. Sans lui le modèle invente
+    // le sens des sigles (« FVJC » a déjà été développé en « Front des Veilleurs Juifs et Chrétiens »).
+    // ⚠️ Ce texte par défaut doit rester identique à ISAD_CONTEXT_DEFAULT dans engine/archivage_workflow.py.
+    var isadContext: String = AppConfig.defaultIsadContext
+
+    static let defaultIsadContext = """
+    CONTEXTE DU FONDS
+
+    Les documents décrits proviennent des archives de la FVJC — Fédération vaudoise des jeunesses \
+    campagnardes. Dans ce fonds, le sigle « FVJC » désigne toujours cette fédération et jamais autre chose.
+
+    La FVJC fédère les sociétés de jeunesse des villages du canton de Vaud, en Suisse romande. Sauf \
+    indication contraire explicite dans le document, les personnes, lieux et événements mentionnés se \
+    rapportent au canton de Vaud et à la Suisse romande, et la langue des documents est le français.
+
+    NATURE DES DOCUMENTS
+
+    Le fonds réunit des pièces produites ou reçues par la fédération, par ses groupements régionaux et par \
+    les sociétés de jeunesse des villages : procès-verbaux d'assemblées et de comités, rapports d'activité, \
+    correspondance, statuts et règlements, programmes et brochures de manifestations, affiches, comptes et \
+    budgets, listes de membres, coupures de presse, photographies légendées. Les documents sont le plus \
+    souvent dactylographiés ou imprimés, parfois manuscrits.
+
+    VOCABULAIRE DU FONDS
+
+    - « jeunesse » ou « société de jeunesse » : association des jeunes d'un village.
+    - « giron » : groupement régional de sociétés de jeunesse, et par extension la fête qu'il organise.
+    - « cantonale » : grande manifestation réunissant l'ensemble de la fédération.
+    - « camping » : terrain d'hébergement des participants pendant une manifestation.
+    - « cortège », « bal », « cantine », « joutes », « comité », « caissier », « syndic », « commune » : \
+    termes d'organisation associative ou d'administration communale vaudoise, à conserver dans ce sens.
+
+    CONSIGNES DE DESCRIPTION
+
+    - Décris uniquement ce qui figure dans le texte fourni ; n'ajoute aucune connaissance extérieure.
+    - Ne développe JAMAIS un sigle qui ne t'est pas connu : recopie-le tel quel.
+    - Le texte provient d'une reconnaissance optique et peut contenir des erreurs, des mots coupés ou des \
+    accents manquants : ignore les coquilles évidentes sans en altérer le sens.
+    - Ces notices alimentent un catalogue d'archives : reste factuel, neutre et concis, sans jugement de \
+    valeur ni tournure promotionnelle.
+    """
     // Application :
     var startAtLogin: Bool = true    // démarrer avec le système (login item)
     var networkEnabled: Bool = true  // découverte réseau + invitation de mise à jour
@@ -87,6 +128,7 @@ struct AppConfig: Codable {
         isadEnabled = d(.isadEnabled, isadEnabled)
         isadModel = d(.isadModel, isadModel)
         isadHost = d(.isadHost, isadHost)
+        isadContext = d(.isadContext, isadContext)
         startAtLogin = d(.startAtLogin, startAtLogin)
         networkEnabled = d(.networkEnabled, networkEnabled)
         remoteUpdateEnabled = d(.remoteUpdateEnabled, remoteUpdateEnabled)   // sinon le réglage ne survivait pas au redémarrage

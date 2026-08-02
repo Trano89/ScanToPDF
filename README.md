@@ -139,6 +139,7 @@ The app is configured through a `config.json` file stored in `/Users/Shared/Scan
 | `isadEnabled` | Write an ISAD(G) finding aid next to each PDF, using a local LLM | `false` |
 | `isadModel` | Ollama model queried (pick it from the drop-down in Preferences) | `"qwen3.5:9b"` |
 | `isadHost` | Base URL of the local Ollama API | `"http://localhost:11434"` |
+| `isadContext` | Description of your fonds sent to the model before every request (editable in Preferences) | FVJC archives context |
 | `networkEnabled` | Enable network/NAS export | `false` |
 | `nasHost` | NAS/SMB server hostname or IP | `""` |
 | `nasShare` | Network share path | `""` |
@@ -199,12 +200,16 @@ produced, asks a **local language model** to describe it, and writes the result 
 
 ### Requirements
 
-Ollama is **not bundled** with ScanToPDF — the app only talks to it over `http://localhost:11434`.
-Install it and pull a model that can generate text:
+Ollama is **not bundled** with ScanToPDF — it stays under your control. Install it and pull a model
+that can generate text:
 
 ```bash
 ollama pull qwen3.5:9b
 ```
+
+You do **not** need to start Ollama yourself: when it is installed on this Mac but not running,
+ScanToPDF launches it (the Ollama app, or `ollama serve`) and waits for it to answer. A **remote**
+host is never started — it belongs to another machine.
 
 ### Setting it up
 
@@ -214,6 +219,11 @@ ollama pull qwen3.5:9b
    **Actualiser la liste** after pulling a new model. If Ollama is not running, the field falls back to
    free text so you can prepare the setting offline.
 3. Leave **Adresse Ollama** on `http://localhost:11434` unless Ollama listens elsewhere.
+4. Review the **Contexte transmis au modèle** box. This editable text describes your fonds — what the
+   acronyms mean, where the documents come from, the vocabulary to respect — and is sent before every
+   description request. It ships with a context written for the FVJC archives; edit it freely for your
+   own fonds, and use **Rétablir le contexte par défaut** to go back. Without it, a model will happily
+   invent an expansion for an unfamiliar acronym.
 
 ### What the finding aid contains
 
@@ -221,7 +231,7 @@ Eight fields, in this order, designed to be short enough to paste into AtoM:
 
 | Field | ISAD(G) | Content |
 |---|---|---|
-| `DATE` | 3.1.3 | `YYYY-MM-DD`, a range, or just the year — `Inconnu` if undated |
+| `DATE` | 3.1.3 | `YYYY-MM-DD`, a range, or just the year — `Inconnu` if undated. When the text carries no date **and the source was already a PDF**, the file's creation date is used instead and the header says so. Never for TIFFs: their creation date is the scanning date, not the document's |
 | `ETENDUE` | 3.1.5 | Extent and medium, e.g. *1 brochure de 18 pages* |
 | `HISTOIRE` | 3.2.3 | Archival history: origin, creator, context |
 | `PORTEE` | 3.3.1 | Scope and content |
@@ -231,15 +241,14 @@ Eight fields, in this order, designed to be short enough to paste into AtoM:
 | `MATIERES` | — | Named entities used as subject access points |
 
 The model is told never to invent anything: missing or unreadable information comes back as `Inconnu`,
-and it must never expand an acronym on its own initiative. The prompt carries the fonds' permanent
-context — **FVJC = Fédération vaudoise des jeunesses campagnardes**, canton de Vaud, Switzerland — so
-the abbreviation is never guessed at. Temperature is kept low so the same document yields a stable
-description.
+and it must never expand an acronym on its own initiative. Everything it knows about your fonds comes
+from the editable context box described above. Temperature is kept low so the same document yields a
+stable description.
 
 ### Guarantees and limits
 
-- **Never blocking.** If Ollama is stopped, the model is missing, or the request times out, the PDF is
-  produced exactly as usual and the reason is written to the log — only the `.txt` is skipped.
+- **Never blocking.** If Ollama cannot be started, the model is missing, or the request times out, the
+  PDF is produced exactly as usual and the reason is written to the log — only the `.txt` is skipped.
 - **Needs a text layer.** The finding aid is built from the OCR layer, so keep **OCR** enabled. A
   PDF with no extractable text produces no finding aid.
 - **Included in the NAS export.** The `.txt` is written before the export step, so it travels with the

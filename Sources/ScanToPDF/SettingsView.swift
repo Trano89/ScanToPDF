@@ -224,8 +224,27 @@ struct SettingsView: View {
                             get: { model.config.isadHost },
                             set: { v in model.update { $0.isadHost = v } }))
                             .textFieldStyle(.roundedBorder)
-                        Text("Après chaque PDF, le texte OCR est résumé par un modèle local (Ollama) en champs ISAD(G) : dates, étendue, histoire archivistique, portée et contenu, mots-clés. Le résultat est écrit dans un fichier « .txt » portant le même nom que le PDF. Ollama doit tourner sur ce Mac et le modèle être installé (« ollama pull \(model.config.isadModel) »). Si Ollama est injoignable, le PDF est produit normalement, sans fiche.")
+                        Text("Après chaque PDF, le texte OCR est résumé par un modèle local (Ollama) en champs ISAD(G) : dates, étendue, histoire archivistique, portée et contenu, mots-clés. Le résultat est écrit dans un fichier « .txt » portant le même nom que le PDF. Si Ollama n'est pas démarré, ScanToPDF le lance automatiquement ; le modèle doit être installé (« ollama pull \(model.config.isadModel) »). En cas d'échec, le PDF est produit normalement, sans fiche.")
                             .font(.caption).foregroundStyle(.secondary)
+
+                        Divider()
+                        Text("Contexte transmis au modèle")
+                        Text("Décrit le fonds pour éviter les contresens (sigles, lieux, vocabulaire). Modifiable librement : il est envoyé tel quel avant chaque demande de description.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        TextEditor(text: Binding(
+                            get: { model.config.isadContext },
+                            set: { v in model.update { $0.isadContext = v } }))
+                            .font(.system(size: 11))
+                            .frame(height: 170)
+                            .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.secondary.opacity(0.35)))
+                        HStack {
+                            Button("Rétablir le contexte par défaut") {
+                                model.update { $0.isadContext = AppConfig.defaultIsadContext }
+                            }
+                            Spacer()
+                            Text("\(model.config.isadContext.count) caractères")
+                                .font(.caption2).foregroundStyle(.tertiary)
+                        }
                     }
                 }
 

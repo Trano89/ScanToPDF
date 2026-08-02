@@ -106,13 +106,20 @@ final class AppModel: ObservableObject {
         let host = config.isadHost
         ollamaStatus = "Recherche des modèles…"
         Task { [weak self] in
-            let found = await OllamaModels.list(host: host)
+            var found = await OllamaModels.list(host: host)
+            if found.isEmpty {
+                // Ollama ne répond pas : s'il est installé ici, on le démarre plutôt que de renvoyer
+                // l'utilisateur vers un terminal (le service met quelques secondes à s'ouvrir).
+                await MainActor.run { [weak self] in self?.ollamaStatus = "Démarrage d'Ollama…" }
+                found = await OllamaModels.startIfNeeded(host: host)
+            }
+            let models = found
             await MainActor.run { [weak self] in
                 guard let self else { return }
-                self.ollamaModels = found
-                self.ollamaStatus = found.isEmpty
-                    ? "Aucun modèle trouvé — Ollama est-il lancé sur \(host) ?"
-                    : "\(found.count) modèle(s) installé(s)."
+                self.ollamaModels = models
+                self.ollamaStatus = models.isEmpty
+                    ? "Ollama introuvable ou sans modèle — installez-le et faites « ollama pull »."
+                    : "\(models.count) modèle(s) installé(s)."
             }
         }
     }

@@ -13,6 +13,7 @@ import re
 import sys
 import grp
 import json
+import time
 import fcntl
 import shutil
 import logging
@@ -128,11 +129,50 @@ DRIVE_FOLDER = str(_CFG.get("driveFolder", "")).strip()
 # champs ISAD et écrit un « <nom>.txt » à côté du PDF. Opt-in, OFF par défaut. Ollama tourne hors de
 # l'app : aucun binaire n'est bundlé, on n'appelle que l'API HTTP locale via la bibliothèque standard.
 OPT_ISAD   = bool(_CFG.get("isadEnabled", False))
+# Contexte du fonds transmis au modèle, ÉDITABLE dans les préférences (le défaut ci-dessous doit rester
+# identique à celui de Config.swift). Sans lui, le modèle invente le sens des sigles : « FVJC » a déjà
+# été développé en « Front des Veilleurs Juifs et Chrétiens ». Vide = aucun contexte transmis.
+ISAD_CONTEXT_DEFAULT = """CONTEXTE DU FONDS
+
+Les documents décrits proviennent des archives de la FVJC — Fédération vaudoise des jeunesses \
+campagnardes. Dans ce fonds, le sigle « FVJC » désigne toujours cette fédération et jamais autre chose.
+
+La FVJC fédère les sociétés de jeunesse des villages du canton de Vaud, en Suisse romande. Sauf \
+indication contraire explicite dans le document, les personnes, lieux et événements mentionnés se \
+rapportent au canton de Vaud et à la Suisse romande, et la langue des documents est le français.
+
+NATURE DES DOCUMENTS
+
+Le fonds réunit des pièces produites ou reçues par la fédération, par ses groupements régionaux et par \
+les sociétés de jeunesse des villages : procès-verbaux d'assemblées et de comités, rapports d'activité, \
+correspondance, statuts et règlements, programmes et brochures de manifestations, affiches, comptes et \
+budgets, listes de membres, coupures de presse, photographies légendées. Les documents sont le plus \
+souvent dactylographiés ou imprimés, parfois manuscrits.
+
+VOCABULAIRE DU FONDS
+
+- « jeunesse » ou « société de jeunesse » : association des jeunes d'un village.
+- « giron » : groupement régional de sociétés de jeunesse, et par extension la fête qu'il organise.
+- « cantonale » : grande manifestation réunissant l'ensemble de la fédération.
+- « camping » : terrain d'hébergement des participants pendant une manifestation.
+- « cortège », « bal », « cantine », « joutes », « comité », « caissier », « syndic », « commune » : \
+termes d'organisation associative ou d'administration communale vaudoise, à conserver dans ce sens.
+
+CONSIGNES DE DESCRIPTION
+
+- Décris uniquement ce qui figure dans le texte fourni ; n'ajoute aucune connaissance extérieure.
+- Ne développe JAMAIS un sigle qui ne t'est pas connu : recopie-le tel quel.
+- Le texte provient d'une reconnaissance optique et peut contenir des erreurs, des mots coupés ou des \
+accents manquants : ignore les coquilles évidentes sans en altérer le sens.
+- Ces notices alimentent un catalogue d'archives : reste factuel, neutre et concis, sans jugement de \
+valeur ni tournure promotionnelle."""
+ISAD_CONTEXT = str(_CFG.get("isadContext", ISAD_CONTEXT_DEFAULT)).strip()
 ISAD_MODEL = str(_CFG.get("isadModel", "qwen3.5:9b")).strip() or "qwen3.5:9b"
 ISAD_HOST  = str(_CFG.get("isadHost", "http://localhost:11434")).strip().rstrip("/") or "http://localhost:11434"
 # Bornes : un OCR de gros document ne doit pas gonfler la requête au LLM ni son temps de réponse.
 ISAD_MAX_CHARS   = 12000    # caractères de texte OCR envoyés au modèle (début du document = le plus signifiant)
 ISAD_TIMEOUT     = 180      # secondes d'attente max de la réponse Ollama (best-effort, non bloquant pour le PDF)
+ISAD_START_WAIT  = 45       # secondes laissées à Ollama pour répondre après un démarrage automatique
 
 # Ghostscript : binaire bundlé fourni par l'app (SCANTOPDF_GS), repli Homebrew.
 if os.environ.get("SCANTOPDF_GS") and Path(os.environ["SCANTOPDF_GS"]).exists():
@@ -799,24 +839,100 @@ def extract_pdf_text(pdf_path: Path, logger: logging.Logger) -> str:
     return ""
 
 
-def _isad_prompt(ocr_text: str, project_name: str) -> str:
+def _pdf_creation_date(pdf_path: Path, logger: logging.Logger) -> str:
+    """Date de création inscrite dans les métadonnées du PDF (« D:20170315… » → « 2017-03-15 »).
+    RÉSERVÉE aux documents dont la source est déjà un PDF : pour un TIFF, cette date serait celle de
+    la NUMÉRISATION, pas celle du document — elle induirait l'archiviste en erreur."""
+    try:
+        import pikepdf
+        with pikepdf.Pdf.open(str(pdf_path)) as pdf:
+            raw = str(pdf.docinfo.get("/CreationDate", "") or "")
+    except Exception as exc:
+        logger.debug(f"Métadonnées PDF illisibles ({pdf_path.name}) : {exc}")
+        return ""
+    m = re.match(r"^D?:?\s*(\d{4})(\d{2})(\d{2})", raw)
+    if not m:
+        return ""
+    year, month, day = (int(g) for g in m.groups())
+    if not (1500 <= year <= 2200 and 1 <= month <= 12 and 1 <= day <= 31):
+        return ""
+    return f"{year:04d}-{month:02d}-{day:02d}"
+
+
+def _ollama_alive(timeout: float = 2.0) -> bool:
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"{ISAD_HOST}/api/tags", timeout=timeout) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+
+
+def ensure_ollama(logger: logging.Logger) -> bool:
+    """S'assure qu'Ollama tourne, et le DÉMARRE sinon (app Ollama du Mac, sinon binaire « ollama serve »).
+    Uniquement pour un serveur LOCAL : une adresse distante appartient à une autre machine, on ne tente
+    jamais d'y lancer quoi que ce soit. Best-effort : un échec n'empêche pas la production du PDF."""
+    if _ollama_alive():
+        return True
+    if not any(h in ISAD_HOST for h in ("localhost", "127.0.0.1", "[::1]")):
+        logger.warning(f"Ollama distant injoignable ({ISAD_HOST}) — fiche ISAD ignorée.")
+        return False
+
+    launched = False
+    app = Path("/Applications/Ollama.app")
+    if app.is_dir():
+        try:
+            subprocess.run(["/usr/bin/open", "-a", str(app)], capture_output=True, timeout=30)
+            launched = True
+        except Exception as exc:
+            logger.debug(f"Lancement de Ollama.app échoué : {exc}")
+    if not launched:
+        for cand in ("/usr/local/bin/ollama", "/opt/homebrew/bin/ollama",
+                     "/Applications/Ollama.app/Contents/Resources/ollama"):
+            if os.access(cand, os.X_OK):
+                try:
+                    # start_new_session : le serveur survit à la fin du workflow (il sert aux suivants).
+                    subprocess.Popen([cand, "serve"], stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL, start_new_session=True)
+                    launched = True
+                    break
+                except Exception as exc:
+                    logger.debug(f"Lancement de « {cand} serve » échoué : {exc}")
+    if not launched:
+        logger.warning("Ollama introuvable sur ce Mac (ni app ni binaire) — fiche ISAD ignorée.")
+        return False
+
+    logger.info("Ollama n'était pas démarré — lancement automatique…")
+    deadline = time.monotonic() + ISAD_START_WAIT
+    while time.monotonic() < deadline:
+        if _ollama_alive(1.5):
+            logger.info("Ollama est prêt.")
+            return True
+        time.sleep(1.0)
+    logger.warning(f"Ollama n'a pas répondu dans les {ISAD_START_WAIT} s — fiche ISAD ignorée.")
+    return False
+
+
+def _isad_prompt(ocr_text: str, project_name: str, fallback_date: str = "") -> str:
     """Prompt en français pour un modèle généraliste (Qwen). Consignes STRICTES : sortie en champs
     fixes, une seule date ou une plage AAAA-MM-JJ, pas d'invention (le bénévole doit pouvoir se fier
     à la fiche). On demande peu de champs pour ne pas surcharger la saisie ultérieure dans AtoM."""
     snippet = ocr_text[:ISAD_MAX_CHARS]
+    # Date de repli : proposée au modèle SEULEMENT si le document lui-même n'en porte aucune.
+    date_fallback = (
+        f"Si le TEXTE OCR ne porte AUCUNE date, et seulement dans ce cas, utilise la date de création "
+        f"du fichier d'origine : {fallback_date}.\n" if fallback_date else "")
     return (
-        "Tu es archiviste de la FVJC. CONTEXTE PERMANENT du fonds, à tenir pour acquis : « FVJC » "
-        "désigne TOUJOURS la Fédération vaudoise des jeunesses campagnardes — fédération des sociétés "
-        "de jeunesse des villages du canton de Vaud, en Suisse romande. Tous les documents de ce fonds "
-        "se rapportent au canton de Vaud (Suisse). Ne développe JAMAIS un sigle de ta propre initiative : "
-        "si un sigle ne t'est pas connu, laisse-le tel quel, sans proposer de signification.\n\n"
-        "À partir du TEXTE OCR d'un document numérisé (parfois bruité par l'OCR), "
+        "Tu es archiviste.\n\n"
+        + (ISAD_CONTEXT + "\n\n" if ISAD_CONTEXT else "")
+        + "À partir du TEXTE OCR d'un document numérisé (parfois bruité par l'OCR), "
         "rédige une fiche descriptive selon la norme ISAD(G), en français, factuelle et concise. "
         "N'invente rien : si une information est absente ou illisible, écris « Inconnu ». "
         "Réponds UNIQUEMENT avec les champs ci-dessous, dans cet ordre exact, chacun sur sa ou ses "
         "lignes, sans commentaire ni Markdown.\n\n"
         "DATE: une date au format AAAA-MM-JJ, ou une plage « AAAA-MM-JJ - AAAA-MM-JJ » si le document "
         "couvre plusieurs dates. Si seule l'année est connue, écris AAAA. Si inconnu, « Inconnu ».\n"
+        + date_fallback +
         "ETENDUE: étendue et support du document (ISAD 3.1.5), ex. « 1 brochure de 18 pages ».\n"
         "HISTOIRE: histoire archivistique (ISAD 3.2.3) : origine, producteur, contexte de création. "
         "2 à 4 phrases.\n"
@@ -838,6 +954,8 @@ def _ollama_generate(prompt: str, logger: logging.Logger) -> str:
     par l'utilisateur. Retourne le texte généré, ou '' en cas d'échec (best-effort)."""
     import urllib.request
     import urllib.error
+    if not ensure_ollama(logger):     # démarre Ollama s'il est local et arrêté
+        return ""
     url = f"{ISAD_HOST}/api/generate"
 
     def _post(body: dict) -> str:
@@ -878,23 +996,34 @@ def _ollama_generate(prompt: str, logger: logging.Logger) -> str:
     return ""
 
 
-def write_isad_sidecar(final_pdf: Path, ocr_text: str, project_name: str, logger: logging.Logger):
+def write_isad_sidecar(final_pdf: Path, ocr_text: str, project_name: str, logger: logging.Logger,
+                       fallback_date: str = ""):
     """Écrit « <nom_du_pdf>.txt » à côté du PDF final avec la fiche ISAD produite par le LLM.
     Best-effort intégral : toute erreur est journalisée et avalée (ne doit jamais casser le PDF)."""
     if not ocr_text.strip():
         logger.info("Fiche ISAD : aucune couche texte exploitable dans le PDF — fiche non générée.")
         return
-    prompt = _isad_prompt(ocr_text, project_name)
+    prompt = _isad_prompt(ocr_text, project_name, fallback_date)
     logger.info(f"Fiche ISAD : interrogation du modèle « {ISAD_MODEL} » via {ISAD_HOST}…")
     body = _ollama_generate(prompt, logger)
     if not body:
         return
+    # Garantie : si le modèle laisse la date inconnue alors que le PDF d'origine en porte une, on la
+    # renseigne nous-mêmes — et on le SIGNALE : l'archiviste doit savoir que la date ne vient pas du
+    # texte mais des métadonnées du fichier.
+    date_note = ""
+    if fallback_date and re.search(r"^DATE\s*:\s*Inconnu\s*$", body, re.IGNORECASE | re.MULTILINE):
+        body = re.sub(r"^(DATE\s*:\s*)Inconnu\s*$", rf"\g<1>{fallback_date}", body,
+                      count=1, flags=re.IGNORECASE | re.MULTILINE)
+        date_note = "Date reprise des métadonnées du PDF d'origine (aucune date dans le texte).\n"
+        logger.info(f"Fiche ISAD : date absente du texte — reprise des métadonnées ({fallback_date}).")
     sidecar = final_pdf.with_suffix(".txt")
     # En-tête minimal pour tracer l'origine (utile au bénévole : sait que c'est auto-généré).
     stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
     header = (f"Fiche archivistique (ISAD G) — générée automatiquement le {stamp}\n"
               f"Document : {final_pdf.name}\n"
               f"Modèle : {ISAD_MODEL}\n"
+              + date_note +
               f"{'-' * 60}\n\n")
     try:
         sidecar.write_text(header + body + "\n", encoding="utf-8")
@@ -929,6 +1058,9 @@ def process_project(project_name: str, source_files: list, logger: logging.Logge
             tif_pdf = TEMP_DIR / f"{project_name}_tiffs.pdf"
             tiff_to_pdf_direct(merge_tiffs(project_name, images, logger), tif_pdf, logger)
             source = merge_pdfs(project_name, [tif_pdf] + pdfs, logger)
+        # Date de repli pour la fiche ISAD : lue sur l'ORIGINAL, avant toute suppression, et UNIQUEMENT
+        # si l'entrée est un PDF — pour un TIFF ce serait la date de numérisation, donc fausse.
+        isad_date = _pdf_creation_date(pdfs[0], logger) if (OPT_ISAD and pdfs and not images) else ""
         staged = run_ocr(source, project_name, logger)
         # finalize_pdf gère en un seul passage Ghostscript : compression @ DPI et/ou vrai PDF/A-2b.
         final_pdf = finalize_pdf(staged, project_name, project_dir, logger)
@@ -950,7 +1082,7 @@ def process_project(project_name: str, source_files: list, logger: logging.Logge
         if OPT_ISAD:
             try:
                 ocr_text = extract_pdf_text(final_pdf, logger)
-                write_isad_sidecar(final_pdf, ocr_text, project_name, logger)
+                write_isad_sidecar(final_pdf, ocr_text, project_name, logger, isad_date)
             except Exception as exc:
                 logger.error(f"Fiche ISAD échouée (ignorée) : {exc}")
 
