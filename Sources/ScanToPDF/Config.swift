@@ -34,6 +34,12 @@ struct AppConfig: Codable {
     var watermarkPosition: String = "diagonal"   // diagonal / center / top / bottom / tile
     var watermarkOpacity: Int = 20               // 0–100 (plus élevé = plus visible/sombre)
     var watermarkHard: Bool = true               // true = fusionné (non supprimable) ; false = calque OCG
+    // Fiche archivistique ISAD(G) : après le PDF final, un LLM local (Ollama) résume le document
+    // scanné en champs ISAD et écrit un « <nom>.txt » à côté du PDF. Opt-in, OFF par défaut (aucun
+    // appel réseau ni fichier annexe tant que non coché). Ollama tourne hors de l'app (non bundlé).
+    var isadEnabled: Bool = false               // générer la fiche texte ISAD à côté du PDF
+    var isadModel: String = "qwen3.5:9b"        // modèle Ollama interrogé (doit être « pull » au préalable)
+    var isadHost: String = "http://localhost:11434"  // URL de base de l'API Ollama locale
     // Application :
     var startAtLogin: Bool = true    // démarrer avec le système (login item)
     var networkEnabled: Bool = true  // découverte réseau + invitation de mise à jour
@@ -78,6 +84,9 @@ struct AppConfig: Codable {
         watermarkPosition = d(.watermarkPosition, watermarkPosition)
         watermarkOpacity = max(0, min(100, d(.watermarkOpacity, watermarkOpacity)))
         watermarkHard = d(.watermarkHard, watermarkHard)
+        isadEnabled = d(.isadEnabled, isadEnabled)
+        isadModel = d(.isadModel, isadModel)
+        isadHost = d(.isadHost, isadHost)
         startAtLogin = d(.startAtLogin, startAtLogin)
         networkEnabled = d(.networkEnabled, networkEnabled)
         remoteUpdateEnabled = d(.remoteUpdateEnabled, remoteUpdateEnabled)   // sinon le réglage ne survivait pas au redémarrage

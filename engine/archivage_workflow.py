@@ -124,6 +124,16 @@ NAS_SHARE    = str(_CFG.get("nasShare", "")).strip()
 NAS_SUBPATH  = str(_CFG.get("nasSubpath", "")).strip().strip("/")
 DRIVE_FOLDER = str(_CFG.get("driveFolder", "")).strip()
 
+# Fiche archivistique ISAD(G) : après le PDF final, un LLM local (Ollama) résume le texte OCR en
+# champs ISAD et écrit un « <nom>.txt » à côté du PDF. Opt-in, OFF par défaut. Ollama tourne hors de
+# l'app : aucun binaire n'est bundlé, on n'appelle que l'API HTTP locale via la bibliothèque standard.
+OPT_ISAD   = bool(_CFG.get("isadEnabled", False))
+ISAD_MODEL = str(_CFG.get("isadModel", "qwen3.5:9b")).strip() or "qwen3.5:9b"
+ISAD_HOST  = str(_CFG.get("isadHost", "http://localhost:11434")).strip().rstrip("/") or "http://localhost:11434"
+# Bornes : un OCR de gros document ne doit pas gonfler la requête au LLM ni son temps de réponse.
+ISAD_MAX_CHARS   = 12000    # caractères de texte OCR envoyés au modèle (début du document = le plus signifiant)
+ISAD_TIMEOUT     = 180      # secondes d'attente max de la réponse Ollama (best-effort, non bloquant pour le PDF)
+
 # Ghostscript : binaire bundlé fourni par l'app (SCANTOPDF_GS), repli Homebrew.
 if os.environ.get("SCANTOPDF_GS") and Path(os.environ["SCANTOPDF_GS"]).exists():
     GHOSTSCRIPT_BIN = os.environ["SCANTOPDF_GS"]
@@ -757,6 +767,136 @@ def export_result(project_dir: Path, project_name: str, logger: logging.Logger):
 
 
 # ─────────────────────────────────────────────────────────────
+# FICHE ISAD(G) — extraction du texte OCR + résumé par LLM local (Ollama)
+# ─────────────────────────────────────────────────────────────
+def extract_pdf_text(pdf_path: Path, logger: logging.Logger) -> str:
+    """Texte de la couche OCR du PDF final. pdfminer.six si présent (meilleure extraction),
+    sinon repli sur Ghostscript txtwrite (TOUJOURS bundlé). Retourne '' si rien n'est extractible
+    (PDF purement image sans OCR) — l'appelant décidera alors de ne pas produire de fiche."""
+    # 1) Tentative pdfminer.six (dépendance optionnelle, absente du bundle par défaut).
+    try:
+        from pdfminer.high_level import extract_text  # type: ignore
+        txt = extract_text(str(pdf_path)) or ""
+        if txt.strip():
+            return txt
+    except Exception as exc:
+        logger.debug(f"pdfminer indisponible ou échec ({exc}) — repli Ghostscript txtwrite.")
+    # 2) Repli Ghostscript : device txtwrite → fichier texte temporaire.
+    try:
+        TEMP_DIR.mkdir(parents=True, exist_ok=True)
+        out_txt = TEMP_DIR / f"{pdf_path.stem}_ocrtext.txt"
+        r = subprocess.run(
+            [GHOSTSCRIPT_BIN, "-dBATCH", "-dNOPAUSE", "-dQUIET",
+             "-sDEVICE=txtwrite", f"-sOutputFile={out_txt}", str(pdf_path)],
+            capture_output=True, text=True, timeout=300)
+        if r.returncode == 0 and out_txt.exists():
+            return out_txt.read_text(encoding="utf-8", errors="replace")
+        logger.debug(f"Ghostscript txtwrite rc={r.returncode} : {r.stderr.strip()[:200]}")
+    except Exception as exc:
+        logger.debug(f"Extraction texte (Ghostscript) échouée : {exc}")
+    return ""
+
+
+def _isad_prompt(ocr_text: str, project_name: str) -> str:
+    """Prompt en français pour un modèle généraliste (Qwen). Consignes STRICTES : sortie en champs
+    fixes, une seule date ou une plage AAAA-MM-JJ, pas d'invention (le bénévole doit pouvoir se fier
+    à la fiche). On demande peu de champs pour ne pas surcharger la saisie ultérieure dans AtoM."""
+    snippet = ocr_text[:ISAD_MAX_CHARS]
+    return (
+        "Tu es archiviste. À partir du TEXTE OCR d'un document numérisé (parfois bruité par l'OCR), "
+        "rédige une fiche descriptive selon la norme ISAD(G), en français, factuelle et concise. "
+        "N'invente rien : si une information est absente ou illisible, écris « Inconnu ». "
+        "Réponds UNIQUEMENT avec les champs ci-dessous, dans cet ordre exact, chacun sur sa ou ses "
+        "lignes, sans commentaire ni Markdown.\n\n"
+        "DATE: une date au format AAAA-MM-JJ, ou une plage « AAAA-MM-JJ - AAAA-MM-JJ » si le document "
+        "couvre plusieurs dates. Si seule l'année est connue, écris AAAA. Si inconnu, « Inconnu ».\n"
+        "ETENDUE: étendue et support du document (ISAD 3.1.5), ex. « 1 brochure de 18 pages ».\n"
+        "HISTOIRE: histoire archivistique (ISAD 3.2.3) : origine, producteur, contexte de création. "
+        "2 à 4 phrases.\n"
+        "PORTEE: portée et contenu (ISAD 3.3.1) : de quoi traite le document, points saillants. "
+        "3 à 6 phrases.\n"
+        "SUJETS: mots-clés thématiques séparés par des virgules.\n"
+        "LIEUX: noms de lieux cités, séparés par des virgules (ou « Inconnu »).\n"
+        "GENRE: type documentaire (ex. brochure, procès-verbal, correspondance, photographie).\n"
+        "MATIERES: points d'accès matières / entités nommées (organisations, événements), "
+        "séparés par des virgules.\n\n"
+        f"Nom de dossier (indice, peut être un code) : {project_name}\n\n"
+        f"TEXTE OCR :\n{snippet}\n"
+    )
+
+
+def _ollama_generate(prompt: str, logger: logging.Logger) -> str:
+    """Appelle l'API Ollama locale (/api/generate, stream désactivé) via la bibliothèque standard.
+    Aucune dépendance externe : l'app ne bundle pas Ollama, elle interroge un service local déjà lancé
+    par l'utilisateur. Retourne le texte généré, ou '' en cas d'échec (best-effort)."""
+    import urllib.request
+    import urllib.error
+    url = f"{ISAD_HOST}/api/generate"
+
+    def _post(body: dict) -> str:
+        req = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"),
+                                     headers={"Content-Type": "application/json"}, method="POST")
+        with urllib.request.urlopen(req, timeout=ISAD_TIMEOUT) as resp:
+            data = json.loads(resp.read().decode("utf-8", errors="replace"))
+        return str(data.get("response", "")).strip()
+
+    body = {
+        "model": ISAD_MODEL,
+        "prompt": prompt,
+        "stream": False,
+        # Modèles à RÉFLEXION (Qwen 3.5…) : sans cette clé ils produisent des milliers de jetons de
+        # raisonnement avant de répondre et dépassent le délai — inutile pour une fiche factuelle.
+        "think": False,
+        # Température basse = fiche factuelle, reproductible (on ne veut pas de créativité ici).
+        "options": {"temperature": 0.2},
+    }
+    try:
+        return _post(body)
+    except urllib.error.HTTPError as exc:
+        # 400 : un modèle sans mode « réflexion » peut refuser la clé « think » → réessai sans elle.
+        if exc.code == 400:
+            body.pop("think", None)
+            try:
+                return _post(body)
+            except Exception as exc2:
+                logger.warning(f"Appel Ollama échoué — fiche ISAD ignorée : {exc2}")
+                return ""
+        # Ollama répond mais rejette la demande (404 = modèle non installé, à « pull » au préalable).
+        logger.warning(f"Ollama a refusé la requête (HTTP {exc.code}) — modèle « {ISAD_MODEL} » "
+                       f"installé ? Fiche ISAD ignorée.")
+    except urllib.error.URLError as exc:
+        logger.warning(f"Ollama injoignable ({ISAD_HOST}) — fiche ISAD ignorée : {exc}")
+    except Exception as exc:
+        logger.warning(f"Appel Ollama échoué — fiche ISAD ignorée : {exc}")
+    return ""
+
+
+def write_isad_sidecar(final_pdf: Path, ocr_text: str, project_name: str, logger: logging.Logger):
+    """Écrit « <nom_du_pdf>.txt » à côté du PDF final avec la fiche ISAD produite par le LLM.
+    Best-effort intégral : toute erreur est journalisée et avalée (ne doit jamais casser le PDF)."""
+    if not ocr_text.strip():
+        logger.info("Fiche ISAD : aucune couche texte exploitable dans le PDF — fiche non générée.")
+        return
+    prompt = _isad_prompt(ocr_text, project_name)
+    logger.info(f"Fiche ISAD : interrogation du modèle « {ISAD_MODEL} » via {ISAD_HOST}…")
+    body = _ollama_generate(prompt, logger)
+    if not body:
+        return
+    sidecar = final_pdf.with_suffix(".txt")
+    # En-tête minimal pour tracer l'origine (utile au bénévole : sait que c'est auto-généré).
+    stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    header = (f"Fiche archivistique (ISAD G) — générée automatiquement le {stamp}\n"
+              f"Document : {final_pdf.name}\n"
+              f"Modèle : {ISAD_MODEL}\n"
+              f"{'-' * 60}\n\n")
+    try:
+        sidecar.write_text(header + body + "\n", encoding="utf-8")
+        logger.info(f"Fiche ISAD écrite : {sidecar}")
+    except Exception as exc:
+        logger.error(f"Écriture de la fiche ISAD échouée : {exc}")
+
+
+# ─────────────────────────────────────────────────────────────
 # TRAITEMENT D'UN PROJET
 # ─────────────────────────────────────────────────────────────
 def process_project(project_name: str, source_files: list, logger: logging.Logger):
@@ -797,6 +937,15 @@ def process_project(project_name: str, source_files: list, logger: logging.Logge
                 except Exception:
                     pass
             logger.info(f"{removed} original(aux) supprimé(s) (option « Supprimer les originaux » activée).")
+
+        # Fiche ISAD(G) : best-effort, n'échoue JAMAIS le traitement (comme l'export). Placée AVANT
+        # l'export pour que le « .txt » parte aussi vers le NAS avec le dossier projet.
+        if OPT_ISAD:
+            try:
+                ocr_text = extract_pdf_text(final_pdf, logger)
+                write_isad_sidecar(final_pdf, ocr_text, project_name, logger)
+            except Exception as exc:
+                logger.error(f"Fiche ISAD échouée (ignorée) : {exc}")
 
         logger.info(f"✅ SUCCÈS : {project_name} → {final_pdf}")
         send_notification(project_name, f"PDF généré : {final_pdf.name}", True, logger)

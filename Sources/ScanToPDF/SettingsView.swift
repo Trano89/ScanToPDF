@@ -193,6 +193,42 @@ struct SettingsView: View {
                     }
                 }
 
+                Section("Fiche archivistique (ISAD)") {
+                    Toggle("Générer une fiche texte ISAD à côté du PDF", isOn: toggle(\.isadEnabled))
+                    if model.config.isadEnabled {
+                        // Menu des modèles réellement installés sur ce Mac. Repli en saisie libre si
+                        // Ollama est injoignable, pour pouvoir préparer le réglage hors ligne.
+                        if model.ollamaModels.isEmpty {
+                            TextField("Modèle Ollama", text: Binding(
+                                get: { model.config.isadModel },
+                                set: { v in model.update { $0.isadModel = v } }))
+                                .textFieldStyle(.roundedBorder)
+                        } else {
+                            Picker("Modèle installé", selection: Binding(
+                                get: { model.config.isadModel },
+                                set: { v in model.update { $0.isadModel = v } })) {
+                                ForEach(model.isadModelChoices, id: \.self) { name in
+                                    Text(name).tag(name)
+                                }
+                            }
+                        }
+                        HStack {
+                            Button("Actualiser la liste") { model.refreshOllamaModels() }
+                            Spacer()
+                            if !model.ollamaStatus.isEmpty {
+                                Text(model.ollamaStatus).font(.caption).foregroundStyle(.secondary)
+                                    .lineLimit(1).truncationMode(.middle)
+                            }
+                        }
+                        TextField("Adresse Ollama", text: Binding(
+                            get: { model.config.isadHost },
+                            set: { v in model.update { $0.isadHost = v } }))
+                            .textFieldStyle(.roundedBorder)
+                        Text("Après chaque PDF, le texte OCR est résumé par un modèle local (Ollama) en champs ISAD(G) : dates, étendue, histoire archivistique, portée et contenu, mots-clés. Le résultat est écrit dans un fichier « .txt » portant le même nom que le PDF. Ollama doit tourner sur ce Mac et le modèle être installé (« ollama pull \(model.config.isadModel) »). Si Ollama est injoignable, le PDF est produit normalement, sans fiche.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+
                 Section("Application") {
                     Toggle("Démarrer avec le système", isOn: toggle(\.startAtLogin))
                     Toggle("Mises à jour entre Mac du réseau (Bonjour)", isOn: toggle(\.networkEnabled))
@@ -264,6 +300,12 @@ struct SettingsView: View {
         }
         .onChange(of: model.config.pageDelimiter) { _, new in
             if let sep = PageSeparator(rawValue: new) { pageDelimChar = sep }
+        }
+        // Liste des modèles Ollama : chargée à l'ouverture des préférences et à l'activation de la
+        // fiche ISAD (pas au démarrage de l'app : inutile de solliciter Ollama tant qu'on n'y touche pas).
+        .onAppear { if model.config.isadEnabled { model.refreshOllamaModels() } }
+        .onChange(of: model.config.isadEnabled) { _, enabled in
+            if enabled { model.refreshOllamaModels() }
         }
     }
 

@@ -13,7 +13,7 @@ PROJ="$(pwd)"
 
 APP_NAME="ScanToPDF"
 BUNDLE_ID="com.antonin.scantopdf"
-VERSION="1.0.8"
+VERSION="1.0.9"
 # Numéro de build COURT et monotone : minutes écoulées depuis 2026-01-01 UTC (≈ 6 chiffres, ex. 266401).
 # Croissant dans le temps → comparable entre Mac pour la mise à jour réseau. (1767225600 = 2026-01-01 00:00 UTC)
 BUILD=$(( ( $(date +%s) - 1767225600 ) / 60 ))
@@ -40,6 +40,19 @@ need dylibbundler dylibbundler
 [ -x "$BREW/bin/gs" ]        || { echo "❌ ghostscript arm64 requis (brew install ghostscript)"; exit 1; }
 [ -x "$BREW/bin/tesseract" ] || { echo "❌ tesseract arm64 requis (brew install tesseract)"; exit 1; }
 [ -x "$BREW/bin/unpaper" ]   || { echo "❌ unpaper arm64 requis (brew install unpaper)"; exit 1; }
+# Un binaire Homebrew peut être PRÉSENT mais incapable de démarrer : une dépendance mise à jour change
+# de numéro (libx265.215 → .216) sans que la formule qui l'utilise soit reliée. On le détecte ICI, en
+# une seconde, plutôt que de le découvrir bien plus loin (dylibbundler cherche alors une bibliothèque
+# fantôme et attend une saisie au clavier — build figé).
+for t in gs tesseract unpaper; do
+  if ! probe=$("$BREW/bin/$t" --version 2>&1); then
+    echo "❌ $t est installé mais ne démarre pas — dépendance Homebrew cassée :"
+    printf '%s\n' "$probe" | grep -m1 -E "Library not loaded" | sed 's/^/   /'
+    echo "   Remède : brew upgrade (ou brew reinstall) la formule qui fournit cette bibliothèque"
+    echo "            — pour unpaper c'est généralement ffmpeg."
+    exit 1
+  fi
+done
 
 # ── 1) Compilation Swift ─────────────────────────────────────────────────────
 echo "→ [1/9] Compilation Swift (release, arm64)…"
@@ -126,9 +139,27 @@ cp -RL "$GS_SRC"/. "$RES/gs-lib/"
 
 # ── 6) Réécriture des install-names (dylibbundler) ───────────────────────────
 echo "→ [6/9] Bundling des dylibs (dylibbundler)…"
+# dylibbundler DEMANDE le chemin d'une bibliothèque qu'il ne trouve pas ; sans terminal la lecture
+# échoue en boucle et il tourne indéfiniment à 100 % de CPU. On ferme donc son entrée standard, on lui
+# donne les dossiers de recherche Homebrew, et on borne son temps d'exécution.
+bundle_dylibs() {
+  local t="$1" pid waited=0
+  dylibbundler -of -b -x "$RES/bin/$t" -d "$RES/lib" -p "@executable_path/../lib" \
+    -s "$BREW/lib" >/dev/null 2>&1 </dev/null &
+  pid=$!
+  while kill -0 "$pid" 2>/dev/null; do
+    sleep 2; waited=$((waited + 2))
+    if [ "$waited" -ge 180 ]; then
+      kill -9 "$pid" 2>/dev/null || true
+      echo "   ❌ dylibbundler bloqué sur $t (bibliothèque introuvable) — abandon après 180 s."
+      return 1
+    fi
+  done
+  wait "$pid" 2>/dev/null || return 1
+}
+DYLIB_WARN=0
 for t in tesseract gs unpaper pngquant jbig2; do
-  dylibbundler -of -b -x "$RES/bin/$t" -d "$RES/lib" -p "@executable_path/../lib" >/dev/null 2>&1 \
-    || echo "   ⚠︎ dylibbundler a signalé un souci sur $t (voir plus bas)"
+  bundle_dylibs "$t" || { echo "   ⚠︎ dylibs incomplètes pour $t → autonomie non garantie."; DYLIB_WARN=1; }
 done
 
 # ── 7) Pré-compilation du bytecode Python ────────────────────────────────────
@@ -215,5 +246,6 @@ echo -n "   signature : "; codesign --verify --deep --strict "$APP" 2>/dev/null 
 
 SIZE="$(du -sh "$APP" | cut -f1)"
 echo "════════════════════════════════════════════════════"
-if [ "$OK" -eq 1 ]; then echo "✓ Terminé : $APP  (build $BUILD, $SIZE)"; else echo "⚠︎ Terminé AVEC des erreurs : $APP ($SIZE)"; fi
+if [ "$OK" -eq 1 ] && [ "$DYLIB_WARN" -eq 0 ]; then echo "✓ Terminé : $APP  (build $BUILD, $SIZE)"
+else echo "⚠︎ Terminé AVEC des erreurs : $APP ($SIZE)"; fi
 echo "════════════════════════════════════════════════════"

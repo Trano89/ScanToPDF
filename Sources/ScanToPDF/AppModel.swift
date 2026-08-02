@@ -23,6 +23,9 @@ final class AppModel: ObservableObject {
     @Published var legacyRemoving = false
     // Export NAS : statut du montage affiché dans les réglages.
     @Published var nasStatus = ""
+    // Fiche ISAD : modèles Ollama installés sur ce Mac (menu des préférences) + statut de la recherche.
+    @Published var ollamaModels: [String] = []
+    @Published var ollamaStatus = ""
 
     private let configStore = ConfigStore()
     private let engine = Engine()
@@ -87,6 +90,30 @@ final class AppModel: ObservableObject {
             let path = MountManager.ensureMounted(host: host, share: share, user: user)
             let message = path.map { "NAS monté : \($0)" } ?? "NAS non monté (le repli Synology Drive sera utilisé)."
             await MainActor.run { [weak self] in self?.nasStatus = message }
+        }
+    }
+
+    // MARK: - fiche ISAD : modèles Ollama installés (menu des préférences)
+    // Le modèle ENREGISTRÉ peut ne plus être installé (ou avoir été saisi à la main) : on le garde
+    // dans la liste, sinon le menu afficherait une ligne vide au lieu de la valeur réellement utilisée.
+    var isadModelChoices: [String] {
+        let current = config.isadModel
+        guard !current.isEmpty, !ollamaModels.contains(current) else { return ollamaModels }
+        return ollamaModels + [current]
+    }
+
+    func refreshOllamaModels() {
+        let host = config.isadHost
+        ollamaStatus = "Recherche des modèles…"
+        Task { [weak self] in
+            let found = await OllamaModels.list(host: host)
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.ollamaModels = found
+                self.ollamaStatus = found.isEmpty
+                    ? "Aucun modèle trouvé — Ollama est-il lancé sur \(host) ?"
+                    : "\(found.count) modèle(s) installé(s)."
+            }
         }
     }
 
