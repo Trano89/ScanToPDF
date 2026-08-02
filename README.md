@@ -16,7 +16,7 @@ ScanToPDF automates the processing of bulk document scans. Instead of manually a
 
 - **Watch Folder** — Monitors a directory for new scanned images and processes them automatically
 - **Batch Grouping** — Groups pages belonging to the same document by their shared filename prefix (e.g., `Eg.w.O0.1901_29` → project `Eg.w.O0.1901`)
-- **PDF Input** — PDFs are processed **exactly like TIFF scans** (same pipeline: isolate → merge → OCR → PDF/A). Paginated PDFs sharing a document name (e.g. `Doc-1.pdf`, `Doc-2.pdf`, …) are merged into one multi-page document. The only PDF-specific rule: if a source PDF's name would collide with the final result (`<project>.pdf`), the original is preserved as `<project>_original.pdf`
+- **PDF Input** — PDFs are processed **exactly like TIFF scans** (same pipeline: isolate → merge → OCR → PDF/A). Only the **page delimiter** marks pages in a PDF name: `Dz.a.Y2.2017_2-1.pdf`, `-2.pdf`, … merge into one document `Dz.a.Y2.2017_2`. The separator stays part of the reference code, so `Dz.a.Y2.2017_2.pdf` is a standalone document — not page 2 of `Dz.a.Y2.2017`. The only PDF-specific rule: if a source PDF's name would collide with the final result (`<project>.pdf`), the original is preserved as `<project>_original.pdf`
 - **OCR** — Powered by Tesseract via [ocrmypdf](https://github.com/ocrmypdf/Ocrmypdf) for text recognition and PDF/A compliance
 - **Image Corrections** — Automatic deskew and rotation to correct misfed scans
 - **Compression** — Reduces output file size without noticeable quality loss
@@ -230,8 +230,11 @@ Eight fields, in this order, designed to be short enough to paste into AtoM:
 | `GENRE` | — | Document type (minutes, correspondence, photograph…) |
 | `MATIERES` | — | Named entities used as subject access points |
 
-The model is told never to invent anything: missing or unreadable information comes back as `Inconnu`.
-Temperature is kept low so the same document yields a stable description.
+The model is told never to invent anything: missing or unreadable information comes back as `Inconnu`,
+and it must never expand an acronym on its own initiative. The prompt carries the fonds' permanent
+context — **FVJC = Fédération vaudoise des jeunesses campagnardes**, canton de Vaud, Switzerland — so
+the abbreviation is never guessed at. Temperature is kept low so the same document yields a stable
+description.
 
 ### Guarantees and limits
 

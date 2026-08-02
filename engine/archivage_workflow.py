@@ -155,11 +155,13 @@ PAGE_PATTERN      = re.compile(
 # Regex : identifiant + n° de pagination (sans sous-page) → un seul TIFF par projet.
 SINGLE_FILE_PATTERN = re.compile(
     rf"^(.+){PAGE_SEPARATOR}(\d{{1,3}})\.(tif|tiff)$", re.IGNORECASE)
-# PDF : pagination INDÉPENDANTE (le regroupement TIFF reste inchangé). Le marqueur de page peut être
-# le séparateur OU le délimiteur (« Doc-1.pdf », « Doc_1.pdf » → projet « Doc », page N). Les pages d'un
-# même document sont fusionnées en un seul PDF. Sans marqueur (ex. « Rapport.pdf ») → PDF autonome.
+# PDF : pagination INDÉPENDANTE (le regroupement TIFF reste inchangé). Seul le DÉLIMITEUR marque une
+# page (« Dz.a.Y2.2017_2-1.pdf » → projet « Dz.a.Y2.2017_2 », page 1) : le séparateur appartient à la
+# COTE (« _2 » = 2ᵉ document de la cote), il ne doit donc PAS être pris pour un numéro de page — sinon
+# « Dz.a.Y2.2017_2.pdf » devient à tort la page 2 de « Dz.a.Y2.2017 » et le « _2 » disparaît du résultat.
+# Sans délimiteur (ex. « Rapport.pdf », « Dz.a.Y2.2017_2.pdf ») → PDF autonome, cote conservée telle quelle.
 PDF_PAGE_PATTERN = re.compile(
-    rf"^(.+)[{PAGE_SEPARATOR}{PAGE_DELIMITER}](\d{{1,3}})\.pdf$", re.IGNORECASE)
+    rf"^(.+){PAGE_DELIMITER}(\d{{1,3}})\.pdf$", re.IGNORECASE)
 
 
 # (init_logging est fourni par le module partagé _logsetup.py)
@@ -803,7 +805,12 @@ def _isad_prompt(ocr_text: str, project_name: str) -> str:
     à la fiche). On demande peu de champs pour ne pas surcharger la saisie ultérieure dans AtoM."""
     snippet = ocr_text[:ISAD_MAX_CHARS]
     return (
-        "Tu es archiviste. À partir du TEXTE OCR d'un document numérisé (parfois bruité par l'OCR), "
+        "Tu es archiviste de la FVJC. CONTEXTE PERMANENT du fonds, à tenir pour acquis : « FVJC » "
+        "désigne TOUJOURS la Fédération vaudoise des jeunesses campagnardes — fédération des sociétés "
+        "de jeunesse des villages du canton de Vaud, en Suisse romande. Tous les documents de ce fonds "
+        "se rapportent au canton de Vaud (Suisse). Ne développe JAMAIS un sigle de ta propre initiative : "
+        "si un sigle ne t'est pas connu, laisse-le tel quel, sans proposer de signification.\n\n"
+        "À partir du TEXTE OCR d'un document numérisé (parfois bruité par l'OCR), "
         "rédige une fiche descriptive selon la norme ISAD(G), en français, factuelle et concise. "
         "N'invente rien : si une information est absente ou illisible, écris « Inconnu ». "
         "Réponds UNIQUEMENT avec les champs ci-dessous, dans cet ordre exact, chacun sur sa ou ses "
