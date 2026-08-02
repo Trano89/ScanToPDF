@@ -137,17 +137,35 @@ ISAD_CONTEXT_DEFAULT = """CONTEXTE DU FONDS
 Les documents décrits proviennent des archives de la FVJC — Fédération vaudoise des jeunesses \
 campagnardes. Dans ce fonds, le sigle « FVJC » désigne toujours cette fédération et jamais autre chose.
 
-La FVJC fédère les sociétés de jeunesse des villages du canton de Vaud, en Suisse romande. Sauf \
-indication contraire explicite dans le document, les personnes, lieux et événements mentionnés se \
+Fondée le 24 mai 1919 à Lausanne par 27 sociétés de jeunesse, la FVJC fédère les sociétés de jeunesse \
+des villages du canton de Vaud, en Suisse romande, et compte aujourd'hui environ 190 sociétés membres. \
+Sauf indication contraire explicite dans le document, les personnes, lieux et événements mentionnés se \
 rapportent au canton de Vaud et à la Suisse romande, et la langue des documents est le français.
+
+ORGANISATION DE LA FÉDÉRATION
+
+- Bureau central : président, vice-présidents, caissier, secrétaire.
+- Comité central : représentants de la fédération et des girons.
+- Commissions spécialisées : ski, rallye, archives, jury, tir, entre autres.
+- Girons, groupements régionaux réunissant les sociétés d'une région : giron du Nord, giron du Centre, \
+giron du Pied du Jura, giron de la Broye.
+
+MANIFESTATIONS RÉCURRENTES
+
+- Assemblée générale annuelle, en janvier.
+- Camp à ski, en février ; rallye, au week-end de Pentecôte ; tir cantonal, en septembre.
+- Girons : quatre fêtes régionales réparties de juin à août.
+- Cantonale : grande fête de la fédération, tous les cinq ans (centenaire à Savigny en 2019).
+- Disciplines pratiquées : lutte, tir à la corde, athlétisme, cross, football, volley-ball, ski, \
+snowboard, concours théâtral, rallye motorisé.
 
 NATURE DES DOCUMENTS
 
-Le fonds réunit des pièces produites ou reçues par la fédération, par ses groupements régionaux et par \
-les sociétés de jeunesse des villages : procès-verbaux d'assemblées et de comités, rapports d'activité, \
-correspondance, statuts et règlements, programmes et brochures de manifestations, affiches, comptes et \
-budgets, listes de membres, coupures de presse, photographies légendées. Les documents sont le plus \
-souvent dactylographiés ou imprimés, parfois manuscrits.
+Le fonds réunit des pièces produites ou reçues par la fédération, par ses girons et par les sociétés de \
+jeunesse des villages : procès-verbaux d'assemblées et de comités, rapports d'activité, correspondance, \
+statuts et règlements, programmes et brochures de manifestations, affiches, comptes et budgets, listes \
+de membres, coupures de presse, photographies légendées. Les documents sont le plus souvent \
+dactylographiés ou imprimés, parfois manuscrits.
 
 VOCABULAIRE DU FONDS
 
@@ -155,6 +173,9 @@ VOCABULAIRE DU FONDS
 - « giron » : groupement régional de sociétés de jeunesse, et par extension la fête qu'il organise.
 - « cantonale » : grande manifestation réunissant l'ensemble de la fédération.
 - « camping » : terrain d'hébergement des participants pendant une manifestation.
+- « pense-bête » ou « annuaire » : brochure annuelle récapitulant l'organisation de la saison — mot du \
+président, composition des organes, calendrier des manifestations, coordonnées des sociétés membres. \
+Un document de ce type est une BROCHURE ANNUELLE, jamais un dossier de classement ni de la correspondance.
 - « cortège », « bal », « cantine », « joutes », « comité », « caissier », « syndic », « commune » : \
 termes d'organisation associative ou d'administration communale vaudoise, à conserver dans ce sens.
 
@@ -162,6 +183,8 @@ CONSIGNES DE DESCRIPTION
 
 - Décris uniquement ce qui figure dans le texte fourni ; n'ajoute aucune connaissance extérieure.
 - Ne développe JAMAIS un sigle qui ne t'est pas connu : recopie-le tel quel.
+- Les noms de communes, de sociétés de jeunesse et de personnes sont des points d'accès précieux pour \
+le catalogue : relève-les systématiquement, y compris lorsqu'ils figurent dans une liste ou un tableau.
 - Le texte provient d'une reconnaissance optique et peut contenir des erreurs, des mots coupés ou des \
 accents manquants : ignore les coquilles évidentes sans en altérer le sens.
 - Ces notices alimentent un catalogue d'archives : reste factuel, neutre et concis, sans jugement de \
@@ -170,7 +193,7 @@ ISAD_CONTEXT = str(_CFG.get("isadContext", ISAD_CONTEXT_DEFAULT)).strip()
 ISAD_MODEL = str(_CFG.get("isadModel", "qwen3.5:9b")).strip() or "qwen3.5:9b"
 ISAD_HOST  = str(_CFG.get("isadHost", "http://localhost:11434")).strip().rstrip("/") or "http://localhost:11434"
 # Bornes : un OCR de gros document ne doit pas gonfler la requête au LLM ni son temps de réponse.
-ISAD_MAX_CHARS   = 12000    # caractères de texte OCR envoyés au modèle (début du document = le plus signifiant)
+ISAD_MAX_CHARS   = 40000    # caractères de texte OCR envoyés au modèle (échantillonnés sur TOUT le document)
 ISAD_TIMEOUT     = 180      # secondes d'attente max de la réponse Ollama (best-effort, non bloquant pour le PDF)
 ISAD_START_WAIT  = 45       # secondes laissées à Ollama pour répondre après un démarrage automatique
 
@@ -911,11 +934,58 @@ def ensure_ollama(logger: logging.Logger) -> bool:
     return False
 
 
-def _isad_prompt(ocr_text: str, project_name: str, fallback_date: str = "") -> str:
+def _pdf_extent(pdf_path: Path) -> tuple:
+    """(nombre de pages, « L × H cm ») du PDF final. Ces données sont MESURÉES : les laisser deviner au
+    modèle donnait « 1 dossier de classement » pour une brochure de 18 pages."""
+    try:
+        import pikepdf
+        with pikepdf.Pdf.open(str(pdf_path)) as pdf:
+            pages = len(pdf.pages)
+            box = pdf.pages[0].mediabox
+            w = (float(box[2]) - float(box[0])) / 72 * 2.54
+            h = (float(box[3]) - float(box[1])) / 72 * 2.54
+        return pages, f"{w:.1f} × {h:.1f} cm".replace(".", ",")
+    except Exception:
+        return 0, ""
+
+
+def _isad_sample(text: str, budget: int) -> str:
+    """Échantillon REPRÉSENTATIF du document. Tronquer au début fait manquer tout ce qui suit : dans
+    une brochure, les listes de sociétés, de communes et de personnes se trouvent au milieu et à la fin
+    (5 des 7 lieux attendus étaient au-delà de la limite). On prélève donc des extraits répartis."""
+    text = text.strip()
+    if len(text) <= budget:
+        return text
+    head = budget // 3                       # le début porte le titre et la nature du document
+    chunks = 8
+    size = (budget - head) // chunks
+    step = max(1, (len(text) - head) // chunks)
+    parts = [text[:head]]
+    for i in range(chunks):
+        start = head + i * step
+        parts.append(text[start:start + size])
+    return "\n[…]\n".join(parts)
+
+
+def _isad_prompt(ocr_text: str, project_name: str, fallback_date: str = "",
+                 facts: dict | None = None) -> str:
     """Prompt en français pour un modèle généraliste (Qwen). Consignes STRICTES : sortie en champs
     fixes, une seule date ou une plage AAAA-MM-JJ, pas d'invention (le bénévole doit pouvoir se fier
     à la fiche). On demande peu de champs pour ne pas surcharger la saisie ultérieure dans AtoM."""
-    snippet = ocr_text[:ISAD_MAX_CHARS]
+    snippet = _isad_sample(ocr_text, ISAD_MAX_CHARS)
+    # Données MESURÉES sur le fichier : le modèle ne doit pas les inventer, il doit les recopier.
+    facts = facts or {}
+    lines = [f"- Cote : {project_name}"]
+    if facts.get("support"):
+        lines.append(f"- Support : {facts['support']}")
+    if facts.get("pages"):
+        lines.append(f"- Nombre de pages : {facts['pages']}")
+    if facts.get("size"):
+        lines.append(f"- Format des pages : {facts['size']}")
+    if fallback_date:
+        lines.append(f"- Date de création du fichier d'origine : {fallback_date}")
+    facts_block = ("DONNÉES FACTUELLES (mesurées sur le fichier — reprends-les telles quelles, "
+                   "ne les contredis pas) :\n" + "\n".join(lines) + "\n\n")
     # Date de repli : proposée au modèle SEULEMENT si le document lui-même n'en porte aucune.
     date_fallback = (
         f"Si le TEXTE OCR ne porte AUCUNE date, et seulement dans ce cas, utilise la date de création "
@@ -931,18 +1001,22 @@ def _isad_prompt(ocr_text: str, project_name: str, fallback_date: str = "") -> s
         "DATE: une date au format AAAA-MM-JJ, ou une plage « AAAA-MM-JJ - AAAA-MM-JJ » si le document "
         "couvre plusieurs dates. Si seule l'année est connue, écris AAAA. Si inconnu, « Inconnu ».\n"
         + date_fallback +
-        "ETENDUE: étendue et support du document (ISAD 3.1.5), ex. « 1 brochure de 18 pages ».\n"
+        "ETENDUE: étendue et support (ISAD 3.1.5). Reprends OBLIGATOIREMENT le nombre de pages et le "
+        "format des DONNÉES FACTUELLES, sous la forme « <nature du document> de N pages, L × H cm » "
+        "(ex. « 1 brochure de 18 pages, 21,0 × 29,7 cm »).\n"
         "HISTOIRE: histoire archivistique (ISAD 3.2.3) : origine, producteur, contexte de création. "
         "2 à 4 phrases.\n"
         "PORTEE: portée et contenu (ISAD 3.3.1) : de quoi traite le document, points saillants. "
         "3 à 6 phrases.\n"
         "SUJETS: mots-clés thématiques séparés par des virgules.\n"
-        "LIEUX: noms de lieux cités, séparés par des virgules (ou « Inconnu »).\n"
+        "LIEUX: noms de lieux, séparés par des virgules. N'indique QUE des noms LITTÉRALEMENT présents "
+        "dans le texte ci-dessous : ne complète jamais par des communes plausibles ou connues par "
+        "ailleurs. Aucun lieu dans le texte → « Inconnu ».\n"
         "GENRE: type documentaire (ex. brochure, procès-verbal, correspondance, photographie).\n"
         "MATIERES: points d'accès matières / entités nommées (organisations, événements), "
         "séparés par des virgules.\n\n"
-        f"Nom de dossier (indice, peut être un code) : {project_name}\n\n"
-        f"TEXTE OCR :\n{snippet}\n"
+        + facts_block
+        + f"TEXTE OCR :\n{snippet}\n"
     )
 
 
@@ -963,6 +1037,11 @@ def _ollama_generate(prompt: str, logger: logging.Logger) -> str:
             data = json.loads(resp.read().decode("utf-8", errors="replace"))
         return str(data.get("response", "")).strip()
 
+    # Ollama plafonne la fenêtre de contexte à 4096 jetons par DÉFAUT, quelle que soit la capacité du
+    # modèle : au-delà, une partie du prompt est écartée EN SILENCE et le modèle décrit un document
+    # qu'il n'a vu qu'en morceaux. On la dimensionne d'après la taille réelle du prompt
+    # (~3 caractères par jeton en français) + une marge pour la réponse, bornée pour la mémoire.
+    num_ctx = min(32768, max(8192, 1 << max(0, (len(prompt) // 3 + 1500) - 1).bit_length()))
     body = {
         "model": ISAD_MODEL,
         "prompt": prompt,
@@ -970,9 +1049,13 @@ def _ollama_generate(prompt: str, logger: logging.Logger) -> str:
         # Modèles à RÉFLEXION (Qwen 3.5…) : sans cette clé ils produisent des milliers de jetons de
         # raisonnement avant de répondre et dépassent le délai — inutile pour une fiche factuelle.
         "think": False,
-        # Température basse = fiche factuelle, reproductible (on ne veut pas de créativité ici).
-        "options": {"temperature": 0.2},
+        # Réglages d'EXTRACTION, pas de rédaction créative. On neutralise explicitement les pénalités
+        # du modèle : certains Modelfile imposent presence_penalty 1.5, qui pousse à produire des mots
+        # NOUVEAUX — exactement le contraire de ce qu'on veut (le modèle inventait des communes).
+        "options": {"temperature": 0.1, "num_ctx": num_ctx, "top_p": 0.9, "top_k": 40,
+                    "presence_penalty": 0, "frequency_penalty": 0, "repeat_penalty": 1.0},
     }
+    logger.info(f"Fiche ISAD : {len(prompt)} caractères envoyés, fenêtre de contexte {num_ctx} jetons.")
     try:
         return _post(body)
     except urllib.error.HTTPError as exc:
@@ -1024,6 +1107,31 @@ def _isad_parse(body: str) -> dict:
     return fields
 
 
+def _isad_filter_places(value: str, ocr_text: str, logger: logging.Logger) -> str:
+    """Ne conserve que les lieux LITTÉRALEMENT présents dans le texte. Un modèle peut aligner des
+    communes parfaitement plausibles mais absentes du document (Bulle, Fribourg, Montreux…) : dans une
+    notice d'archives, un lieu inventé est pire qu'un lieu manquant. Comparaison insensible à la casse,
+    aux accents et à la ponctuation, pour absorber le bruit de l'OCR."""
+    import unicodedata
+
+    def norm(s: str) -> str:
+        s = unicodedata.normalize("NFD", s.lower())
+        s = "".join(c for c in s if unicodedata.category(c) != "Mn")
+        return re.sub(r"[^a-z0-9]+", "", s)
+
+    hay = norm(ocr_text)
+    kept, dropped = [], []
+    for raw in re.split(r"[,;]", value):
+        item = re.sub(r"\(.*?\)", "", raw).strip(" .;")
+        if not item:
+            continue
+        (kept if norm(item) and norm(item) in hay else dropped).append(item)
+    if dropped:
+        logger.info(f"Fiche ISAD : {len(dropped)} lieu(x) écarté(s) car absents du texte — "
+                    f"{', '.join(dropped[:6])}")
+    return ", ".join(kept) if kept else "Inconnu"
+
+
 def _isad_clean_date(value: str) -> str:
     """« 1989-04-XX » → « 1989-04 » : le modèle comble parfois par des X les composantes inconnues,
     ce qui n'est pas une date exploitable dans un catalogue."""
@@ -1059,26 +1167,32 @@ def _isad_render(fields: dict, raw: str) -> str:
 
 
 def write_isad_sidecar(final_pdf: Path, ocr_text: str, project_name: str, logger: logging.Logger,
-                       fallback_date: str = ""):
+                       fallback_date: str = "", from_pdf: bool = False):
     """Écrit « <nom_du_pdf>.txt » à côté du PDF final avec la fiche ISAD produite par le LLM.
     Best-effort intégral : toute erreur est journalisée et avalée (ne doit jamais casser le PDF)."""
     if not ocr_text.strip():
         logger.info("Fiche ISAD : aucune couche texte exploitable dans le PDF — fiche non générée.")
         return
-    prompt = _isad_prompt(ocr_text, project_name, fallback_date)
+    pages, size = _pdf_extent(final_pdf)
+    facts = {"pages": pages or None, "size": size or None,
+             "support": "document PDF numérique" if from_pdf else "numérisation de documents papier"}
+    prompt = _isad_prompt(ocr_text, project_name, fallback_date, facts)
     logger.info(f"Fiche ISAD : interrogation du modèle « {ISAD_MODEL} » via {ISAD_HOST}…")
     body = _ollama_generate(prompt, logger)
     if not body:
         return
+    fields = _isad_parse(body)
     # Garantie : si le modèle laisse la date inconnue alors que le PDF d'origine en porte une, on la
     # renseigne nous-mêmes — et on le SIGNALE : l'archiviste doit savoir que la date ne vient pas du
     # texte mais des métadonnées du fichier.
     date_note = ""
-    if fallback_date and re.search(r"^DATE\s*:\s*Inconnu\s*$", body, re.IGNORECASE | re.MULTILINE):
-        body = re.sub(r"^(DATE\s*:\s*)Inconnu\s*$", rf"\g<1>{fallback_date}", body,
-                      count=1, flags=re.IGNORECASE | re.MULTILINE)
+    if fallback_date and fields.get("DATE", "").strip().lower().startswith("inconnu"):
+        fields["DATE"] = fallback_date
         date_note = "Date reprise des métadonnées du PDF d'origine (aucune date dans le texte).\n"
         logger.info(f"Fiche ISAD : date absente du texte — reprise des métadonnées ({fallback_date}).")
+    # Filet de sécurité déterministe contre les lieux inventés (cf. _isad_filter_places).
+    if fields.get("LIEUX"):
+        fields["LIEUX"] = _isad_filter_places(fields["LIEUX"], ocr_text, logger)
     sidecar = final_pdf.with_suffix(".txt")
     # En-tête : provenance de la fiche (auto-générée, par quel modèle, et d'où vient la date).
     stamp = datetime.datetime.now().strftime("%Y-%m-%d à %H:%M")
@@ -1093,7 +1207,7 @@ def write_isad_sidecar(final_pdf: Path, ocr_text: str, project_name: str, logger
               + "Relecture : description produite par une machine — à vérifier avant publication.\n"
               + "═" * ISAD_WIDTH + "\n\n")
     try:
-        sidecar.write_text(header + _isad_render(_isad_parse(body), body), encoding="utf-8")
+        sidecar.write_text(header + _isad_render(fields, body), encoding="utf-8")
         logger.info(f"Fiche ISAD écrite : {sidecar}")
     except Exception as exc:
         logger.error(f"Écriture de la fiche ISAD échouée : {exc}")
@@ -1149,7 +1263,8 @@ def process_project(project_name: str, source_files: list, logger: logging.Logge
         if OPT_ISAD:
             try:
                 ocr_text = extract_pdf_text(final_pdf, logger)
-                write_isad_sidecar(final_pdf, ocr_text, project_name, logger, isad_date)
+                write_isad_sidecar(final_pdf, ocr_text, project_name, logger, isad_date,
+                                   from_pdf=bool(pdfs and not images))
             except Exception as exc:
                 logger.error(f"Fiche ISAD échouée (ignorée) : {exc}")
 

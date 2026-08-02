@@ -221,10 +221,13 @@ host is never started — it belongs to another machine.
    free text so you can prepare the setting offline.
 3. Leave **Adresse Ollama** on `http://localhost:11434` unless Ollama listens elsewhere.
 4. Review the **Contexte transmis au modèle** box. This editable text describes your fonds — what the
-   acronyms mean, where the documents come from, the vocabulary to respect — and is sent before every
-   description request. It ships with a context written for the FVJC archives; edit it freely for your
-   own fonds, and use **Rétablir le contexte par défaut** to go back. Without it, a model will happily
-   invent an expansion for an unfamiliar acronym.
+   acronyms mean, the organisation behind them, the recurring events, the vocabulary to respect — and
+   is sent before every description request. It ships with a context written for the FVJC archives;
+   edit it freely for your own fonds, and use **Rétablir le contexte par défaut** to go back. This box
+   is the single biggest lever on description quality: without it a model will invent an expansion for
+   an unfamiliar acronym, and it will not recognise a house term (a *pense-bête* is an annual brochure,
+   not a filing folder). After upgrading ScanToPDF, click **Rétablir le contexte par défaut** to pick
+   up an improved shipped context — your own edits are never overwritten automatically.
 
 ### What the finding aid contains
 
@@ -243,8 +246,24 @@ Eight fields, in this order, designed to be short enough to paste into AtoM:
 
 The model is told never to invent anything: missing or unreadable information comes back as `Inconnu`,
 and it must never expand an acronym on its own initiative. Everything it knows about your fonds comes
-from the editable context box described above. Temperature is kept low so the same document yields a
-stable description.
+from the editable context box described above.
+
+Four measures keep the description faithful to the document:
+
+- **The whole document is read.** Up to 40 000 characters of OCR text are sent; beyond that, excerpts
+  are sampled across the entire file rather than truncating to the first pages — otherwise everything
+  after the opening pages (lists of societies, places, people) would be invisible to the model.
+- **The context window is sized to the prompt.** Ollama caps it at 4096 tokens by default whatever the
+  model supports, silently discarding part of a long prompt; ScanToPDF sets `num_ctx` from the actual
+  prompt length instead.
+- **Extraction settings, not creative ones.** Low temperature, and the penalties that push a model
+  towards *new* words (`presence_penalty`, some model files ship it at 1.5) are explicitly neutralised.
+- **Place names are verified.** Any place the model returns that does not literally appear in the OCR
+  text is dropped from the finding aid, and the removal is logged. In archival description an invented
+  place is worse than a missing one.
+
+Measured extent — page count and page size — is taken from the PDF itself and handed to the model as
+fact, rather than left to guesswork.
 
 ### Guarantees and limits
 
