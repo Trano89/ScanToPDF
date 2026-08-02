@@ -254,7 +254,7 @@ Several measures keep the description faithful to the document:
   97.5% of the extracted volume on this fonds. Uncompacted, the budget sent to the model is spent on
   blanks (about a thousand real characters out of forty thousand) and the description has nothing to
   work from. Runs of spaces and blank lines are collapsed before anything else.
-- **The whole document is read.** Up to 20 000 characters of *useful* text are sent; beyond that,
+- **The whole document is read.** Up to 480 000 characters of *useful* text are sent; beyond that,
   excerpts are sampled across the entire file rather than truncating to the first pages — otherwise
   everything after the opening pages (lists of societies, places, people) would be invisible.
 - **Only trustworthy measurements are asserted.** Page count always; page dimensions only when the
@@ -263,9 +263,10 @@ Several measures keep the description faithful to the document:
   stays silent rather than recording a false measurement.
 - **A thin result is flagged.** When OCR yields almost no text, the finding aid says so in its header
   instead of presenting a confident description built on nothing.
-- **The context window is sized to the prompt.** Ollama caps it at 4096 tokens by default whatever the
-  model supports, silently discarding part of a long prompt; ScanToPDF sets `num_ctx` from the actual
-  prompt length instead.
+- **A fixed 128k-token context window.** Ollama caps it at 4096 tokens by default whatever the model
+  supports, silently discarding part of a long prompt. ScanToPDF requests 131 072 tokens outright
+  rather than deriving a size from the document at hand — the next document may be far larger than
+  anything processed so far. Use a model whose context reaches that size.
 - **Extraction settings, not creative ones.** Low temperature, and the penalties that push a model
   towards *new* words (`presence_penalty`, some model files ship it at 1.5) are explicitly neutralised.
 - **Place names are verified.** Any place the model returns that does not literally appear in the OCR

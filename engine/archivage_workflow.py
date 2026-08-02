@@ -193,11 +193,15 @@ ISAD_CONTEXT = str(_CFG.get("isadContext", ISAD_CONTEXT_DEFAULT)).strip()
 ISAD_MODEL = str(_CFG.get("isadModel", "qwen3.5:9b")).strip() or "qwen3.5:9b"
 ISAD_HOST  = str(_CFG.get("isadHost", "http://localhost:11434")).strip().rstrip("/") or "http://localhost:11434"
 # Bornes : un OCR de gros document ne doit pas gonfler la requête au LLM ni son temps de réponse.
-# Budget de texte UTILE (le texte est compacté avant échantillonnage : ces 20 000 caractères sont du
-# vrai texte, là où 40 000 caractères bruts n'en contenaient qu'un millier). Au-delà, le temps de
-# génération croît sans gain de justesse — mesuré sur ce fonds.
-ISAD_MAX_CHARS   = 20000
-ISAD_TIMEOUT     = 600      # secondes d'attente max (inclut le chargement à froid du modèle, ~40 s)
+# Fenêtre de contexte, FIXE. Ollama la plafonne à 4096 jetons par défaut quelle que soit la capacité
+# du modèle, ce qui tronque le prompt en silence. On impose donc 128k jetons, sans la déduire de la
+# taille du document : rien ne garantit que les pièces à venir ressembleront à celles déjà traitées.
+ISAD_CTX         = 131072
+# Budget de texte UTILE envoyé au modèle (le texte est compacté au préalable : ces caractères sont du
+# vrai texte, là où 40 000 caractères bruts n'en contenaient qu'un millier). Dimensionné pour remplir
+# la fenêtre ci-dessus sans risque de troncature, même dans l'hypothèse basse de 4 caractères par jeton.
+ISAD_MAX_CHARS   = 480000
+ISAD_TIMEOUT     = 900      # secondes d'attente max (inclut le chargement à froid du modèle, ~40 s)
 ISAD_MAX_TOKENS  = 1500     # réponse bornée : huit champs n'en demandent pas davantage
 ISAD_START_WAIT  = 45       # secondes laissées à Ollama pour répondre après un démarrage automatique
 ISAD_MIN_TEXT    = 400      # en deçà, l'OCR n'a rien rendu d'exploitable → la fiche est signalée comme fragile
@@ -1128,11 +1132,7 @@ def _ollama_generate(prompt: str, logger: logging.Logger) -> str:
             logger.info(f"Fiche ISAD : {used} jetons de prompt (fenêtre {ctx}).")
         return str(data.get("response", "")).strip()
 
-    # Ollama plafonne la fenêtre de contexte à 4096 jetons par DÉFAUT, quelle que soit la capacité du
-    # modèle : au-delà, une partie du prompt est écartée EN SILENCE et le modèle décrit un document
-    # qu'il n'a vu qu'en morceaux. On la dimensionne d'après la taille réelle du prompt
-    # (~3 caractères par jeton en français) + une marge pour la réponse, bornée pour la mémoire.
-    num_ctx = min(32768, max(8192, 1 << max(0, (len(prompt) // 3 + 1500) - 1).bit_length()))
+    num_ctx = ISAD_CTX
     body = {
         "model": ISAD_MODEL,
         "prompt": prompt,
