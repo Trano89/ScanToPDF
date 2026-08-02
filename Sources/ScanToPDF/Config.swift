@@ -5,12 +5,11 @@ import Foundation
 // décocher une case ici change le comportement du pipeline sans recompiler.
 struct AppConfig: Codable {
     var watchFolder: String = "/Users/Shared/FVJC_SCAN"   // dossier surveillé
-    // Règle de regroupement des fichiers par projet / page (configurée via menu dans les préférences) :
-    // Les noms suivent le schéma : <projectIdentifier><separator><pageN>.tif (ex. « Eg.w.O0.1901_29-1.tif »)
-    // — pageSeparator : caractère entre l'identifiant projet et le n° de pagination (menu : -, _, ., ~, :, espace)
-    // — pageDelimiter : caractère entre le n° du document et le n° de page au sein d'une série (ex. « - » dans Doc_29-1.tif)
-    var pageSeparator: String = "_"   // sépare l'identifiant projet du n° de pagination (défaut : « _ »)
-    var pageDelimiter: String = "-"   // sépare le n° du doc du n° de page au sein d'une série (défaut : « - »)
+    // Regroupement des fichiers par document / page — règle UNIQUE, valable pour les TIFF comme pour
+    // les PDF : « <cote><pageDelimiter><n° de page> ». Tout ce qui précède le délimiteur est la COTE,
+    // reprise telle quelle pour le dossier et le PDF produit (« Be.a.S1.1989_1-2.tif » → cote
+    // « Be.a.S1.1989_1 », page 2). Sans délimiteur, le fichier est un document d'une seule pièce.
+    var pageDelimiter: String = "-"   // caractère précédant le n° de page (menu : -, _, ., ~, :, espace)
     // Étapes du pipeline (cases à cocher) :
     var ocr: Bool = true             // couche texte OCR (fra+eng)
     var tesseractPSM: Int = 3        // segmentation : 3=auto (détecte les COLONNES), 4=colonne unique, 6=bloc
@@ -104,7 +103,6 @@ struct AppConfig: Codable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         func d<T: Decodable>(_ key: CodingKeys, _ def: T) -> T { (try? c.decode(T.self, forKey: key)) ?? def }
         watchFolder = d(.watchFolder, watchFolder)
-        pageSeparator = d(.pageSeparator, pageSeparator)
         pageDelimiter = d(.pageDelimiter, pageDelimiter)
         ocr = d(.ocr, ocr)
         tesseractPSM = d(.tesseractPSM, tesseractPSM)

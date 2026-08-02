@@ -32,10 +32,9 @@ final class Engine {
         e["SCANTOPDF_CONFIG"] = AppPaths.configURL.path
         e["SCANTOPDF_GS"] = "\(binDir)/gs"
         e["SCANTOPDF_APPSUPPORT"] = AppPaths.appSupport.path
-        // Règles de regroupement : le moteur les lit dans config.json (source UNIQUE de vérité).
-        // On ne pose PLUS SCANTOPDF_PAGE_SEPARATOR/DELIMITER ici : ces variables étaient prioritaires
-        // côté Python et, figées en dur, elles écrasaient les séparateurs choisis dans les préférences.
-        e.removeValue(forKey: "SCANTOPDF_PAGE_SEPARATOR")
+        // Règle de regroupement : le moteur la lit dans config.json (source UNIQUE de vérité). On ne
+        // pose PLUS SCANTOPDF_PAGE_DELIMITER ici : cette variable était prioritaire côté Python et,
+        // figée en dur, elle écrasait le séparateur choisi dans les préférences.
         e.removeValue(forKey: "SCANTOPDF_PAGE_DELIMITER")
         e["SCAN_DIR"] = watchFolder
         e["TMPDIR"] = AppPaths.tempDir.path

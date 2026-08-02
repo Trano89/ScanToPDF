@@ -15,8 +15,8 @@ ScanToPDF automates the processing of bulk document scans. Instead of manually a
 ## Features
 
 - **Watch Folder** — Monitors a directory for new scanned images and processes them automatically
-- **Batch Grouping** — Groups pages belonging to the same document by their shared filename prefix (e.g., `Eg.w.O0.1901_29` → project `Eg.w.O0.1901`)
-- **PDF Input** — PDFs are processed **exactly like TIFF scans** (same pipeline: isolate → merge → OCR → PDF/A). Only the **page delimiter** marks pages in a PDF name: `Dz.a.Y2.2017_2-1.pdf`, `-2.pdf`, … merge into one document `Dz.a.Y2.2017_2`. The separator stays part of the reference code, so `Dz.a.Y2.2017_2.pdf` is a standalone document — not page 2 of `Dz.a.Y2.2017`. The only PDF-specific rule: if a source PDF's name would collide with the final result (`<project>.pdf`), the original is preserved as `<project>_original.pdf`
+- **Batch Grouping** — One rule, identical for TIFFs and PDFs: the **page delimiter** (`-` by default) introduces the page number, and everything before it is the reference code, kept verbatim for the folder and the resulting PDF. `Be.a.S1.1989_1-1.tif`, `-2`, `-3` → one document `Be.a.S1.1989_1`; `Be.a.S1.1989_1.tif` alone → a single-piece document under that same name
+- **PDF Input** — PDFs go through **exactly the same pipeline** as TIFF scans (isolate → merge → OCR → PDF/A) and follow the same naming rule. The only PDF-specific behaviour: if a source PDF's name would collide with the final result (`<project>.pdf`), the original is preserved as `<project>_original.pdf`
 - **OCR** — Powered by Tesseract via [ocrmypdf](https://github.com/ocrmypdf/Ocrmypdf) for text recognition and PDF/A compliance
 - **Image Corrections** — Automatic deskew and rotation to correct misfed scans
 - **Compression** — Reduces output file size without noticeable quality loss
@@ -110,7 +110,6 @@ The app is configured through a `config.json` file stored in `/Users/Shared/Scan
   "exportEnabled": false,
   "notify": true,
   "startAtLogin": false,
-  "pageSeparator": "_",
   "pageDelimiter": "-"
 }
 ```
@@ -148,8 +147,7 @@ The app is configured through a `config.json` file stored in `/Users/Shared/Scan
 | `exportEnabled` | Copy finished PDFs to the network location | `false` |
 | `notify` | Show macOS notifications for progress/events | `true` |
 | `startAtLogin` | Launch the app when macOS starts | `false` |
-| `pageSeparator` | Character separating project ID from pagination number (e.g., `_` in `Doc_29-1.tif`) | `"_"` |
-| `pageDelimiter` | Character separating page number within a batch (e.g., `-` in `Doc_29-1.tif`) | `"-"` |
+| `pageDelimiter` | Character introducing the page number; everything before it is the reference code | `"-"` |
 
 ## How It Works
 
@@ -179,17 +177,20 @@ All processing activity is logged in `/Users/Shared/ScanToPDF/logs/`:
 
 ## Customizing File Grouping
 
-You can configure how files are grouped into document batches using the **Preferences** pane → **Regroupement des fichiers** section, or directly via `config.json`:
+A **single** character drives the grouping — **Séparateur de pagination** (`pageDelimiter`, default `-`),
+set in **Preferences → Regroupement des fichiers** or in `config.json`. It introduces the page number;
+everything before it is the reference code and is reproduced verbatim in the folder name and in the
+resulting PDF. TIFFs and PDFs obey exactly the same rule.
 
-- **Separateur identifiant-projet** (`pageSeparator`): the character between the project identifier and the pagination number (default: `_`). For `Eg.w.O0.1901_29`, this is `_`. Use `-` if your identifiers already contain underscores.
-- **Séparateur pagination** (`pageDelimiter`): the character between the document number and individual page numbers within a batch (default: `-`). For `Eg.w.O0.1901_29-1`, this is `-`.
+| Files dropped in the watch folder | Folder | Result |
+|---|---|---|
+| `Be.a.S1.1989_1-1.tif`, `-2`, `-3` | `Be.a.S1.1989_1/` | `Be.a.S1.1989_1.pdf` (3 pages) |
+| `Be.a.S1.1989_1.tif` | `Be.a.S1.1989_1/` | `Be.a.S1.1989_1.pdf` (1 page) |
+| `Be.a.S1.1989_1.pdf` | `Be.a.S1.1989_1/` | `Be.a.S1.1989_1.pdf`, original kept as `Be.a.S1.1989_1_original.pdf` |
 
-Example — renaming your files to use dots instead of underscores:
-```
-Doc.1.1.tif   → project "Doc", pagination "1", page 1
-Doc.1.2.tif   → project "Doc", pagination "1", page 2
-```
-Set `pageSeparator` = `.` and `pageDelimiter` = `.` (or a different character for each role).
+Note that `_1` belongs to the reference code: it is a document number, never a page number. If your
+codes already contain `-`, pick another delimiter (`_`, `.`, `~`, `:` or a space) so that the split
+happens where you intend.
 
 ## ISAD(G) Finding Aids (local AI)
 

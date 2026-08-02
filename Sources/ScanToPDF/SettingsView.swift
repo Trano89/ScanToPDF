@@ -29,10 +29,6 @@ struct SettingsView: View {
     @EnvironmentObject var model: AppModel
     @State private var folder: String = AppModel.shared.config.watchFolder
     @State private var passphrase: String = AppModel.shared.clusterPassphrase
-    @State private var pageSepChar: PageSeparator = {
-        guard let found = PageSeparator.allCases.first(where: { $0.rawValue == AppModel.shared.config.pageSeparator }) else { return .underscore }
-        return found
-    }()
     @State private var pageDelimChar: PageSeparator = {
         guard let found = PageSeparator.allCases.first(where: { $0.rawValue == AppModel.shared.config.pageDelimiter }) else { return .dash }
         return found
@@ -117,20 +113,10 @@ struct SettingsView: View {
                 }
 
                 Section("Regroupement des fichiers") {
-                    Text("Le moteur Python regroupe les TIFF par projet en lisant config.json. Ces caractères servent à séparer l'identifiant du document du numéro de page dans les noms de fichier (ex. « Eg.w.O0.1901_29-1.tif »). Par exemple : Ab.c.DE.9999-1.tif, Ab.c.DE.9999-2.tif seront regroupés en un seul PDF.")
+                    Text("Un seul caractère détermine le découpage : celui qui précède le NUMÉRO DE PAGE. Tout ce qui se trouve avant lui est la cote, conservée telle quelle pour le dossier et le PDF produit — TIFF et PDF suivent exactement la même règle.")
                         .font(.caption).foregroundStyle(.secondary)
                     VStack(alignment: .leading, spacing: 6) {
-                        Picker("Séparateur identifiant-projet", selection: Binding(
-                            get: { pageSepChar },
-                            set: { pageSepChar = $0; model.update { $0.pageSeparator = pageSepChar.rawValue } }
-                        )) {
-                            ForEach(PageSeparator.allCases) { sep in
-                                Text(sep.displayName).tag(sep)
-                            }
-                        }
-                        .padding(.leading, 18)
-                        Text("Caractère entre l'identifiant du document et le n° de pagination. Ex. « _ » dans Eg.w.O0.1901_29-1.tif").font(.caption).foregroundStyle(.secondary)
-                        Picker("Séparateur pagination", selection: Binding(
+                        Picker("Séparateur de pagination", selection: Binding(
                             get: { pageDelimChar },
                             set: { pageDelimChar = $0; model.update { $0.pageDelimiter = pageDelimChar.rawValue } }
                         )) {
@@ -139,7 +125,8 @@ struct SettingsView: View {
                             }
                         }
                         .padding(.leading, 18)
-                        Text("Caractère entre le n° du document et le n° de page au sein d'une série. Ex. « - » dans Eg.w.O0.1901_29-1.tif pour séparer les pages Ab.c.DE.9999-1, 9999-2, etc.").font(.caption).foregroundStyle(.secondary)
+                        Text("Avec « \(pageDelimChar.rawValue) » : Be.a.S1.1989_1\(pageDelimChar.rawValue)1, Be.a.S1.1989_1\(pageDelimChar.rawValue)2, Be.a.S1.1989_1\(pageDelimChar.rawValue)3 → un seul document « Be.a.S1.1989_1 » de 3 pages. Un fichier sans numéro de page (Be.a.S1.1989_1) devient un document d'une seule pièce, sous ce nom.")
+                            .font(.caption).foregroundStyle(.secondary)
                     }
                 }
 
@@ -314,9 +301,6 @@ struct SettingsView: View {
         }
         .frame(width: 460, height: 600)
         .onChange(of: model.config.watchFolder) { _, new in folder = new }
-        .onChange(of: model.config.pageSeparator) { _, new in
-            if let sep = PageSeparator(rawValue: new) { pageSepChar = sep }
-        }
         .onChange(of: model.config.pageDelimiter) { _, new in
             if let sep = PageSeparator(rawValue: new) { pageDelimChar = sep }
         }

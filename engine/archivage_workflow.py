@@ -184,17 +184,14 @@ elif Path("/usr/local/bin/gs").exists():
 else:
     GHOSTSCRIPT_BIN = "gs"
 
-# Règle de regroupement : « <identifiant><pageSep><pageNum>(<pageDelim><n>) .tif(f) »
-# Les deux séparateurs sont configurables via les variables d'environnement posées par l'app Swift.
-PAGE_SEPARATOR    = re.escape(os.environ.get("SCANTOPDF_PAGE_SEPARATOR", _CFG.get("pageSeparator", "_")))
-PAGE_DELIMITER    = re.escape(os.environ.get("SCANTOPDF_PAGE_DELIMITER",   _CFG.get("pageDelimiter",   "-")))
-# Regex : tout ce qui précède le dernier « sep » est l'identifiant du document, suivi du n° de pagination.
-# Les pages d'une même série sont séparées par le delimeter (ex. Doc_29-1, Doc_29-2).
+# Règle de regroupement, IDENTIQUE pour les TIFF et les PDF : seul le DÉLIMITEUR marque une page.
+# « Be.a.S1.1989_1-1.tiff », « -2 », « -3 » → projet « Be.a.S1.1989_1 », pages 1, 2, 3.
+# « Be.a.S1.1989_1.tiff » (sans délimiteur) → projet « Be.a.S1.1989_1 », document d'une seule pièce.
+# Tout ce qui précède le dernier délimiteur est la COTE et doit être conservé tel quel dans le nom du
+# dossier et du PDF produit — le « _1 » y désigne le n° de document, pas un n° de page.
+PAGE_DELIMITER    = re.escape(os.environ.get("SCANTOPDF_PAGE_DELIMITER", _CFG.get("pageDelimiter", "-")))
 PAGE_PATTERN      = re.compile(
-    rf"^(.+){PAGE_SEPARATOR}(\d{{1,3}}){PAGE_DELIMITER}\d{{1,3}}\.(tif|tiff)$", re.IGNORECASE)
-# Regex : identifiant + n° de pagination (sans sous-page) → un seul TIFF par projet.
-SINGLE_FILE_PATTERN = re.compile(
-    rf"^(.+){PAGE_SEPARATOR}(\d{{1,3}})\.(tif|tiff)$", re.IGNORECASE)
+    rf"^(.+){PAGE_DELIMITER}(\d{{1,3}})\.(tif|tiff)$", re.IGNORECASE)
 # PDF : pagination INDÉPENDANTE (le regroupement TIFF reste inchangé). Seul le DÉLIMITEUR marque une
 # page (« Dz.a.Y2.2017_2-1.pdf » → projet « Dz.a.Y2.2017_2 », page 1) : le séparateur appartient à la
 # COTE (« _2 » = 2ᵉ document de la cote), il ne doit donc PAS être pris pour un numéro de page — sinon
@@ -246,15 +243,16 @@ def detect_and_group(logger: logging.Logger) -> dict:
             else:
                 groups.setdefault(entry.stem.strip(), []).append((0, entry))
             continue
+        if entry.suffix.lower() not in (".tif", ".tiff"):
+            continue
+        # Même règle que pour les PDF : délimiteur = page, sinon document d'une seule pièce. Un TIFF
+        # sans numéro n'est plus IGNORÉ en silence (il l'était : il ne ressortait jamais du dossier).
         page_match = PAGE_PATTERN.match(entry.name)
         if page_match:
             project_name = page_match.group(1).strip()
             page_num     = int(page_match.group(2))
         else:
-            single_match = SINGLE_FILE_PATTERN.match(entry.name)
-            if not single_match:
-                continue
-            project_name = single_match.group(1).strip()
+            project_name = entry.stem.strip()
             page_num     = 0
         groups.setdefault(project_name, []).append((page_num, entry))
     for project_name in groups:
@@ -996,6 +994,70 @@ def _ollama_generate(prompt: str, logger: logging.Logger) -> str:
     return ""
 
 
+# Champs de la fiche : clé demandée au modèle, intitulé lisible, référence ISAD(G).
+ISAD_FIELDS = (
+    ("DATE",     "DATE DU DOCUMENT",        "ISAD 3.1.3"),
+    ("ETENDUE",  "ÉTENDUE ET SUPPORT",      "ISAD 3.1.5"),
+    ("HISTOIRE", "HISTOIRE ARCHIVISTIQUE",  "ISAD 3.2.3"),
+    ("PORTEE",   "PORTÉE ET CONTENU",       "ISAD 3.3.1"),
+    ("GENRE",    "TYPE DOCUMENTAIRE",       ""),
+    ("SUJETS",   "MOTS-CLÉS — SUJETS",      ""),
+    ("LIEUX",    "MOTS-CLÉS — LIEUX",       ""),
+    ("MATIERES", "POINTS D'ACCÈS MATIÈRES", ""),
+)
+ISAD_LIST_FIELDS = {"SUJETS", "LIEUX", "MATIERES"}   # rendus en liste, un terme par ligne
+ISAD_WIDTH = 78                                       # largeur de repli du texte (lisible en Aperçu)
+
+
+def _isad_parse(body: str) -> dict:
+    """Découpe la réponse du modèle en champs. Tolérant : « DATE: » comme « DATE : », casse variable,
+    et texte débordant sur plusieurs lignes (rattaché au champ courant)."""
+    keys = {f[0] for f in ISAD_FIELDS}
+    fields, current = {}, None
+    for line in body.splitlines():
+        m = re.match(r"^\s*([A-ZÀ-Ü]+)\s*:\s*(.*)$", line.strip())
+        if m and m.group(1).upper() in keys:
+            current = m.group(1).upper()
+            fields[current] = m.group(2).strip()
+        elif current and line.strip():
+            fields[current] = (fields[current] + " " + line.strip()).strip()
+    return fields
+
+
+def _isad_clean_date(value: str) -> str:
+    """« 1989-04-XX » → « 1989-04 » : le modèle comble parfois par des X les composantes inconnues,
+    ce qui n'est pas une date exploitable dans un catalogue."""
+    return re.sub(r"[-/](?:[Xx]{1,2}|00)\b", "", value).strip()
+
+
+def _isad_render(fields: dict, raw: str) -> str:
+    """Met la fiche en page : une section par champ, titre souligné, texte replié en paragraphes et
+    mots-clés en liste — pour être lisible d'un coup d'œil au lieu d'un pavé de huit lignes."""
+    import textwrap
+    out = []
+    for key, title, ref in ISAD_FIELDS:
+        value = (fields.get(key) or "").strip()
+        if not value:
+            value = "Inconnu"
+        if key == "DATE":
+            value = _isad_clean_date(value)
+        heading = f"{title}  ({ref})" if ref else title
+        out.append(heading)
+        out.append("─" * ISAD_WIDTH)
+        if key in ISAD_LIST_FIELDS and value.lower() != "inconnu":
+            for item in [t.strip(" .;") for t in re.split(r"[,;]", value) if t.strip(" .;")]:
+                out.extend(textwrap.wrap(item, ISAD_WIDTH - 2,
+                                         initial_indent="• ", subsequent_indent="  ") or ["• " + item])
+        else:
+            # Une ligne vide entre les paragraphes du modèle, sinon repli simple à la bonne largeur.
+            for para in [p.strip() for p in value.split("\n") if p.strip()] or [value]:
+                out.extend(textwrap.wrap(para, ISAD_WIDTH) or [para])
+        out.append("")
+    if not fields:      # réponse inattendue : on conserve le texte brut plutôt que de le perdre
+        out += ["RÉPONSE BRUTE DU MODÈLE (format inattendu)", "─" * ISAD_WIDTH, raw.strip(), ""]
+    return "\n".join(out)
+
+
 def write_isad_sidecar(final_pdf: Path, ocr_text: str, project_name: str, logger: logging.Logger,
                        fallback_date: str = ""):
     """Écrit « <nom_du_pdf>.txt » à côté du PDF final avec la fiche ISAD produite par le LLM.
@@ -1018,15 +1080,20 @@ def write_isad_sidecar(final_pdf: Path, ocr_text: str, project_name: str, logger
         date_note = "Date reprise des métadonnées du PDF d'origine (aucune date dans le texte).\n"
         logger.info(f"Fiche ISAD : date absente du texte — reprise des métadonnées ({fallback_date}).")
     sidecar = final_pdf.with_suffix(".txt")
-    # En-tête minimal pour tracer l'origine (utile au bénévole : sait que c'est auto-généré).
-    stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-    header = (f"Fiche archivistique (ISAD G) — générée automatiquement le {stamp}\n"
-              f"Document : {final_pdf.name}\n"
-              f"Modèle : {ISAD_MODEL}\n"
-              + date_note +
-              f"{'-' * 60}\n\n")
+    # En-tête : provenance de la fiche (auto-générée, par quel modèle, et d'où vient la date).
+    stamp = datetime.datetime.now().strftime("%Y-%m-%d à %H:%M")
+    header = ("═" * ISAD_WIDTH + "\n"
+              "FICHE ARCHIVISTIQUE — ISAD(G)\n"
+              f"{final_pdf.stem}\n"
+              + "═" * ISAD_WIDTH + "\n"
+              f"Document  : {final_pdf.name}\n"
+              f"Générée   : automatiquement le {stamp}\n"
+              f"Modèle    : {ISAD_MODEL}\n"
+              + (f"Remarque  : {date_note}" if date_note else "")
+              + "Relecture : description produite par une machine — à vérifier avant publication.\n"
+              + "═" * ISAD_WIDTH + "\n\n")
     try:
-        sidecar.write_text(header + body + "\n", encoding="utf-8")
+        sidecar.write_text(header + _isad_render(_isad_parse(body), body), encoding="utf-8")
         logger.info(f"Fiche ISAD écrite : {sidecar}")
     except Exception as exc:
         logger.error(f"Écriture de la fiche ISAD échouée : {exc}")
