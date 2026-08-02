@@ -384,6 +384,10 @@ def tiff_to_pdf_direct(tiff_path: Path, out_pdf: Path, logger: logging.Logger):
 # OCR / traitement image — OCRmyPDF (conditionnel selon les cases)
 # ─────────────────────────────────────────────────────────────
 def run_ocr(tiff_path: Path, project_name: str, logger: logging.Logger) -> Path:
+    # Le dossier de travail n'était créé que par les fonctions de FUSION. Sur le chemin « un seul PDF »
+    # il n'y a pas de fusion : sur une installation neuve, ocrmypdf échouait donc à écrire sa sortie
+    # (« Output file location is not a writable file ») et le repli livrait un PDF SANS couche texte.
+    TEMP_DIR.mkdir(parents=True, exist_ok=True)
     out_pdf = TEMP_DIR / f"{project_name}_ocr.pdf"
     image_steps = OPT_DESKEW or OPT_CLEAN or OPT_ROTATE
     is_pdf_in = tiff_path.suffix.lower() == ".pdf"   # ocrmypdf accepte aussi un PDF en entrée
@@ -430,7 +434,10 @@ def run_ocr(tiff_path: Path, project_name: str, logger: logging.Logger) -> Path:
         # Repli tolérant : PDF en entrée → on finalise l'original sans couche OCR ;
         # TIFF sans OCR requis → conversion directe. Sinon on lève.
         if is_pdf_in:
-            logger.info("Repli : le PDF original sera finalisé sans couche OCR.")
+            # Repli utile (mieux vaut un PDF qu'aucun résultat), mais il doit être VISIBLE : sans
+            # couche texte, le document n'est pas cherchable et aucune fiche ISAD ne pourra être écrite.
+            logger.warning("Repli : PDF finalisé SANS couche texte — document non cherchable et "
+                           "fiche ISAD impossible. Corrigez la cause ci-dessus puis retraitez.")
             return tiff_path
         if not OPT_OCR:
             tiff_to_pdf_direct(tiff_path, out_pdf, logger)
@@ -921,14 +928,23 @@ def _pdf_creation_date(pdf_path: Path, logger: logging.Logger) -> str:
     """Date de création inscrite dans les métadonnées du PDF (« D:20170315… » → « 2017-03-15 »).
     RÉSERVÉE aux documents dont la source est déjà un PDF : pour un TIFF, cette date serait celle de
     la NUMÉRISATION, pas celle du document — elle induirait l'archiviste en erreur."""
+    raw = ""
     try:
         import pikepdf
         with pikepdf.Pdf.open(str(pdf_path)) as pdf:
-            raw = str(pdf.docinfo.get("/CreationDate", "") or "")
+            raw = str(pdf.docinfo.get("/CreationDate", "") or "") if pdf.docinfo else ""
+            if not raw:
+                # Beaucoup de PDF récents ne portent leur date que dans les métadonnées XMP.
+                try:
+                    with pdf.open_metadata() as meta:
+                        raw = str(meta.get("xmp:CreateDate", "") or "")
+                except Exception:
+                    raw = ""
     except Exception as exc:
         logger.debug(f"Métadonnées PDF illisibles ({pdf_path.name}) : {exc}")
         return ""
-    m = re.match(r"^D?:?\s*(\d{4})(\d{2})(\d{2})", raw)
+    # « D:20170710080542+02'00' » comme « 2017-07-10T08:05:42+02:00 »
+    m = re.match(r"^D?:?\s*(\d{4})-?(\d{2})-?(\d{2})", raw)
     if not m:
         return ""
     year, month, day = (int(g) for g in m.groups())
@@ -1309,6 +1325,10 @@ def write_isad_sidecar(final_pdf: Path, ocr_text: str, project_name: str, logger
               f"Générée   : automatiquement le {stamp}\n"
               f"Modèle    : {ISAD_MODEL}\n"
               + (f"Remarque  : {date_note}" if date_note else "")
+              # Provenance de la date : on donne TOUJOURS la date inscrite dans le fichier d'origine
+              # quand il y en a une. L'archiviste voit ainsi d'où peut venir la date de la fiche, sans
+              # qu'on prétende savoir si le modèle l'a lue dans le texte ou reprise du fichier.
+              + (f"Fichier   : date de création du PDF d'origine {fallback_date}\n" if fallback_date else "")
               + (f"⚠ Alerte  : {thin_note}" if thin_note else "")
               + "Relecture : description produite par une machine — à vérifier avant publication.\n"
               + "═" * ISAD_WIDTH + "\n\n")
@@ -1396,6 +1416,7 @@ def process_project(project_name: str, source_files: list, logger: logging.Logge
 # ─────────────────────────────────────────────────────────────
 def main():
     logger  = init_logging("scantopdf", "archivage", LOG_DIR)
+    TEMP_DIR.mkdir(parents=True, exist_ok=True)   # dossier de travail garanti dès le départ
     lock_fd = acquire_lock(logger)
     try:
         logger.info(f"ScanToPDF — surveillance : {SCAN_DIR}")
