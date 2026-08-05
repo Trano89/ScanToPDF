@@ -191,7 +191,36 @@ accents manquants : ignore les coquilles évidentes sans en altérer le sens.
 valeur ni tournure promotionnelle."""
 ISAD_CONTEXT = str(_CFG.get("isadContext", ISAD_CONTEXT_DEFAULT)).strip()
 ISAD_MODEL = str(_CFG.get("isadModel", "qwen3.5:9b")).strip() or "qwen3.5:9b"
-ISAD_HOST  = str(_CFG.get("isadHost", "http://localhost:11434")).strip().rstrip("/") or "http://localhost:11434"
+# Contrôle de l'hôte Ollama. Le TEXTE INTÉGRAL du document lui est transmis : une adresse publique
+# saisie par erreur ferait sortir le contenu des archives de la maison. On n'accepte donc que la
+# machine elle-même ou le réseau privé (un Ollama hébergé sur un autre Mac du réseau reste possible).
+_ISAD_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "[::1]"}
+
+
+def _validate_isad_host(url: str) -> str:
+    """Renvoie l'URL si son hôte est local ou privé, sinon une chaîne vide."""
+    from urllib.parse import urlparse
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return ""
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme not in ("http", "https") or not host:
+        return ""
+    if host in _ISAD_LOCAL_HOSTS or host.startswith("127.") or host.endswith((".local", ".lan")):
+        return url
+    m = re.match(r"^(\d{1,3})\.(\d{1,3})\.", host)      # plages privées RFC 1918
+    if m:
+        a, b = int(m.group(1)), int(m.group(2))
+        if a == 10 or (a == 192 and b == 168) or (a == 172 and 16 <= b <= 31):
+            return url
+    return ""
+
+
+_ISAD_HOST_RAW = str(_CFG.get("isadHost", "http://localhost:11434")).strip().rstrip("/")
+ISAD_HOST  = _validate_isad_host(_ISAD_HOST_RAW) or "http://localhost:11434"
+# Le journal n'existe pas encore ici : on mémorise le rejet pour le signaler au démarrage du workflow.
+_ISAD_HOST_REJECTED = _ISAD_HOST_RAW if (_ISAD_HOST_RAW and ISAD_HOST != _ISAD_HOST_RAW) else ""
 # Bornes : un OCR de gros document ne doit pas gonfler la requête au LLM ni son temps de réponse.
 # Fenêtre de contexte, FIXE. Ollama la plafonne à 4096 jetons par défaut quelle que soit la capacité
 # du modèle, ce qui tronque le prompt en silence. On impose donc 128k jetons, sans la déduire de la
@@ -744,6 +773,10 @@ def send_notification(title: str, message: str, success: bool, logger: logging.L
         console_user = ""
     if not console_user or console_user == "root":
         return
+    # Une notification s'affiche à l'écran, visible de quiconque passe : on n'y laisse aucun chemin
+    # absolu. Le message de succès ne porte déjà que le nom du fichier, mais un message d'ERREUR peut
+    # charrier le chemin complet du dossier de travail — on le réduit à son dernier segment.
+    message = re.sub(r"(?:/[^\s'\"]+)+/([^/\s'\"]+)", r"\1", message)
     message_short = (message[:200] + "…") if len(message) > 200 else message
     icon = "✅" if success else "❌"
     body = f"{icon} {message_short}"
@@ -772,14 +805,17 @@ def fix_permissions(path: Path, logger: logging.Logger):
             os.chown(path, -1, STAFF_GID)
         except PermissionError:
             pass
-        os.chmod(path, 0o775)
+        # Le groupe « staff » (tous les comptes locaux) garde la LECTURE, comme prévu par le partage ;
+        # on retire en revanche l'écriture au groupe et tout accès aux autres — des archives n'ont pas
+        # à être lisibles au-delà des comptes de la machine, notamment si le dossier part sur un partage.
+        os.chmod(path, 0o750)
         for item in path.rglob("*"):
             try:
                 try:
                     os.chown(item, -1, STAFF_GID)
                 except PermissionError:
                     pass
-                os.chmod(item, 0o775 if item.is_dir() else 0o664)
+                os.chmod(item, 0o750 if item.is_dir() else 0o640)
             except (PermissionError, FileNotFoundError):
                 pass
     except Exception as exc:
@@ -1417,6 +1453,10 @@ def process_project(project_name: str, source_files: list, logger: logging.Logge
 def main():
     logger  = init_logging("scantopdf", "archivage", LOG_DIR)
     TEMP_DIR.mkdir(parents=True, exist_ok=True)   # dossier de travail garanti dès le départ
+    if _ISAD_HOST_REJECTED:
+        logger.warning(f"Adresse Ollama « {_ISAD_HOST_REJECTED} » refusée : seuls la machine locale et "
+                       f"le réseau privé sont autorisés (le texte du document y serait envoyé). "
+                       f"Repli sur {ISAD_HOST}.")
     lock_fd = acquire_lock(logger)
     try:
         logger.info(f"ScanToPDF — surveillance : {SCAN_DIR}")

@@ -339,7 +339,11 @@ final class UpdateService {
         guard AppVersion.build > 0 else { return "Cette copie n'est pas une vraie application installée (build 0)." }
         let appPath = Bundle.main.bundlePath
         guard appPath.hasSuffix(".app") else { return "L'application n'est pas un bundle .app." }
+        // `target` est une COPIE locale : ce qui arrive ensuite à updateTarget ne peut plus la changer.
+        // On libère malgré tout la cible retenue, afin qu'une seconde tentative reparte d'une annonce
+        // fraîche plutôt que d'un point de terminaison devenu périmé.
         guard let target = queue.sync(execute: { updateTarget }) else { return "Aucun Mac source détecté." }
+        queue.async { self.updateTarget = nil }
         let conn = NWConnection(to: target.endpoint, using: tlsParameters())
         let ready: Bool = await withCheckedContinuation { cont in
             let once = ResumeGuard()
