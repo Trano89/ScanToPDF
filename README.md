@@ -26,6 +26,14 @@ ScanToPDF automates the processing of bulk document scans. Instead of manually a
 - **Network Export** (optional) — Can copy finished PDFs to a NAS or shared network drive
 - **Multi-Mac Sync** — Optional over-the-air app updates across Macs on the same local network
 
+## Changelog
+
+### v1.0.19 — ISAD(G) finding aid formatting fix
+- Wider wrap width (120 vs 78 chars) for **Histoire Archivistique** and **Portée et Contenu** fields in the ISAD sidecar `.txt` file, so multi-sentence descriptions no longer break at arbitrary line lengths
+
+### v1.0.18 — Security audit fixes
+- Applied three sound findings from security audit, rejected two as false positives
+
 ## Releases
 
 Pre-compiled releases are available on the [Releases page](https://github.com/Trano89/ScanToPDF/releases) :
