@@ -1233,7 +1233,8 @@ ISAD_FIELDS = (
     ("MATIERES", "POINTS D'ACCÈS MATIÈRES", ""),
 )
 ISAD_LIST_FIELDS = {"SUJETS", "LIEUX", "MATIERES"}   # rendus en liste, un terme par ligne
-ISAD_WIDTH = 78                                       # largeur de repli du texte (lisible en Aperçu)
+ISAD_WIDTH   = 78                                     # largeur de repli par défaut (lisible en Aperçu)
+ISAD_WIDE    = 120                                    # HISTOIRE et PORTEE : plusieurs phrases, éviter les retours prématurés
 
 
 def _isad_parse(body: str) -> dict:
@@ -1300,14 +1301,18 @@ def _isad_render(fields: dict, raw: str) -> str:
         heading = f"{title}  ({ref})" if ref else title
         out.append(heading)
         out.append("─" * ISAD_WIDTH)
+        # HISTOIRE et PORTEE acceptent plusieurs phrases : on leur donne plus de largeur pour éviter
+        # des retours à la ligne prématurés qui coupent les phrases en deux. Les autres champs sont courts
+        # et ne bénéficient pas de cette largeur accrue — textwrap.wrap fait son travail sans coupure.
+        wrap_w = ISAD_WIDE if key in ("HISTOIRE", "PORTEE") else ISAD_WIDTH
         if key in ISAD_LIST_FIELDS and value.lower() != "inconnu":
             for item in [t.strip(" .;") for t in re.split(r"[,;]", value) if t.strip(" .;")]:
-                out.extend(textwrap.wrap(item, ISAD_WIDTH - 2,
+                out.extend(textwrap.wrap(item, wrap_w - 2,
                                          initial_indent="• ", subsequent_indent="  ") or ["• " + item])
         else:
             # Une ligne vide entre les paragraphes du modèle, sinon repli simple à la bonne largeur.
             for para in [p.strip() for p in value.split("\n") if p.strip()] or [value]:
-                out.extend(textwrap.wrap(para, ISAD_WIDTH) or [para])
+                out.extend(textwrap.wrap(para, wrap_w) or [para])
         out.append("")
     if not fields:      # réponse inattendue : on conserve le texte brut plutôt que de le perdre
         out += ["RÉPONSE BRUTE DU MODÈLE (format inattendu)", "─" * ISAD_WIDTH, raw.strip(), ""]
