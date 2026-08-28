@@ -109,14 +109,16 @@ struct AppConfig: Codable {
     var remoteUpdateEnabled: Bool = true  // vérification périodique des releases GitHub
     var dismissedUpdateBuild: Int = 0 // build LAN refusé via « Plus tard » (ne plus reproposer)
     var dismissedUpdateVersion: String = ""  // version GitHub refusée via « Plus tard » (ex. « 1.0.8 »)
-    // Export du résultat vers le NAS (Synology). Le dossier projet est classé selon son nom
-    // (« Eg.w.O0.… » → Eg/w/O0/) sur le NAS SMB monté (priorité), sinon dans le dossier Synology Drive.
-    var exportEnabled: Bool = false  // copier le dossier résultat vers le NAS / Synology Drive
-    var nasHost: String = "192.168.0.100"  // serveur SMB (IP ou nom)
-    var nasShare: String = ""        // nom du partage SMB (monté sous /Volumes/<share>)
+    // Publication du résultat sur un LECTEUR RÉSEAU SMB monté (et rien d'autre). Le dossier projet
+    // y est classé selon son nom (« Eg.w.O0.… » → Eg/w/O0/).
+    var exportEnabled: Bool = false  // copier le dossier résultat vers le lecteur réseau
+    // Le lecteur est retenu par son POINT DE MONTAGE et par son ORIGINE SMB ; la seconde permet de le
+    // remonter tout seul s'il a été éjecté. Aucun repli local : sans lecteur monté, rien n'est publié —
+    // un résultat déposé ailleurs qu'à sa place définitive serait plus nuisible qu'un export différé.
+    var nasVolumePath: String = ""   // point de montage retenu, ex. « /Volumes/Archives »
+    var nasMountFrom: String = ""    // origine SMB, ex. « //antonin@DS1513/Archives »
     var nasSubpath: String = ""      // sous-dossier racine des archives sous le partage (optionnel)
-    var nasUser: String = ""         // nom d'utilisateur SMB (le mot de passe passe par le dialogue macOS/Trousseau)
-    var driveFolder: String = ""     // dossier Synology Drive local (repli si NAS non monté)
+    var nasLocked: Bool = false      // tout changement de lecteur exige le mot de passe admin du Mac
 
     init() {}
 
@@ -156,11 +158,10 @@ struct AppConfig: Codable {
         dismissedUpdateBuild = d(.dismissedUpdateBuild, dismissedUpdateBuild)
         dismissedUpdateVersion = d(.dismissedUpdateVersion, dismissedUpdateVersion)
         exportEnabled = d(.exportEnabled, exportEnabled)
-        nasHost = d(.nasHost, nasHost)
-        nasShare = d(.nasShare, nasShare)
+        nasVolumePath = d(.nasVolumePath, nasVolumePath)
+        nasMountFrom = d(.nasMountFrom, nasMountFrom)
         nasSubpath = d(.nasSubpath, nasSubpath)
-        nasUser = d(.nasUser, nasUser)
-        driveFolder = d(.driveFolder, driveFolder)
+        nasLocked = d(.nasLocked, nasLocked)
     }
 }
 

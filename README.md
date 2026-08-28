@@ -23,7 +23,7 @@ ScanToPDF automates the processing of bulk document scans. Instead of manually a
 - **PDF/A** — Exports in the archival PDF/A format for long-term preservation
 - **Watermarking** (optional) — Stamps every page with either **text** or an **image** (PNG with transparency, JPEG, TIFF). Choose placement (diagonal, centred, top, bottom, tiled), opacity, and whether it is burned in or added as a removable "Filigrane" layer
 - **ISAD(G) Finding Aid** (optional) — After each PDF, a **local LLM** (Ollama, running on your own Mac) reads the OCR layer and writes an archival description next to the PDF as `<name>.txt`. Pick any installed model from a drop-down in Preferences. Nothing leaves your machine
-- **Network Export** (optional) — Can copy finished PDFs to a NAS or shared network drive
+- **Network Publication** (optional) — Publishes finished folders to a **mounted SMB network drive**, picked from a drop-down of the drives actually mounted. The choice is remembered, the drive is remounted on its own when it has been ejected, and the setting can be locked behind the Mac administrator password. No local fallback: with no drive mounted nothing is published
 - **Multi-Mac Sync** — Optional over-the-air app updates across Macs on the same local network
 
 ## Changelog
@@ -111,10 +111,10 @@ The app is configured through a `config.json` file stored in `/Users/Shared/Scan
   "isadModel": "qwen3.5:9b",
   "isadHost": "http://localhost:11434",
   "networkEnabled": false,
-  "nasHost": "",
-  "nasShare": "",
+  "nasVolumePath": "",
+  "nasMountFrom": "",
   "nasSubpath": "",
-  "nasUser": "",
+  "nasLocked": false,
   "exportEnabled": false,
   "notify": true,
   "startAtLogin": false,
@@ -148,11 +148,11 @@ The app is configured through a `config.json` file stored in `/Users/Shared/Scan
 | `isadHost` | Base URL of the local Ollama API | `"http://localhost:11434"` |
 | `isadContext` | Description of your fonds sent to the model before every request (editable in Preferences) | FVJC archives context |
 | `networkEnabled` | Enable network/NAS export | `false` |
-| `nasHost` | NAS/SMB server hostname or IP | `""` |
-| `nasShare` | Network share path | `""` |
-| `nasSubpath` | Subfolder on the share | `""` |
-| `nasUser` | Username for authentication | `""` |
-| `exportEnabled` | Copy finished PDFs to the network location | `false` |
+| `exportEnabled` | Publish finished folders to the network drive | `false` |
+| `nasVolumePath` | Mount point of the chosen SMB drive, e.g. `/Volumes/Archives` | `""` |
+| `nasMountFrom` | SMB origin of that drive, e.g. `//user@server/share` — used to remount it | `""` |
+| `nasSubpath` | Subfolder on the drive | `""` |
+| `nasLocked` | Changing the drive requires the Mac administrator password | `false` |
 | `notify` | Show macOS notifications for progress/events | `true` |
 | `startAtLogin` | Launch the app when macOS starts | `false` |
 | `pageDelimiter` | Character introducing the page number; everything before it is the reference code | `"-"` |

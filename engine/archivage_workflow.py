@@ -119,11 +119,11 @@ if WM_TYPE == "image":
 elif not WM_TEXT:
     OPT_WM = False
 
-# Export du résultat vers le NAS (priorité) ou le dossier Synology Drive (repli).
+# Publication du résultat sur un LECTEUR RÉSEAU SMB monté — et rien d'autre. Sans lecteur monté, on
+# ne publie pas : déposer un résultat ailleurs qu'à sa place définitive serait pire qu'un export différé.
 OPT_EXPORT   = bool(_CFG.get("exportEnabled", False))
-NAS_SHARE    = str(_CFG.get("nasShare", "")).strip()
+NAS_VOLUME   = str(_CFG.get("nasVolumePath", "")).strip().rstrip("/")
 NAS_SUBPATH  = str(_CFG.get("nasSubpath", "")).strip().strip("/")
-DRIVE_FOLDER = str(_CFG.get("driveFolder", "")).strip()
 
 # Fiche archivistique ISAD(G) : après le PDF final, un LLM local (Ollama) résume le texte OCR en
 # champs ISAD et écrit un « <nom>.txt » à côté du PDF. Opt-in, OFF par défaut. Ollama tourne hors de
@@ -844,21 +844,21 @@ def resolve_dir(base: Path, code: str, logger: logging.Logger) -> Path:
 
 
 def export_result(project_dir: Path, project_name: str, logger: logging.Logger):
-    """Copie le dossier projet vers la destination, classé selon son nom (« Eg.w.O0.… » → Eg/w/O0/)."""
+    """Copie le dossier projet sur le lecteur réseau, classé selon son nom (« Eg.w.O0.… » → Eg/w/O0/)."""
     if not OPT_EXPORT:
         return
-    # Base : NAS SMB monté (/Volumes/<share>[/<subpath>]) en PRIORITÉ, sinon dossier Synology Drive.
-    base = None
-    if NAS_SHARE:
-        nas = Path("/Volumes") / NAS_SHARE
-        if NAS_SUBPATH:
-            nas = nas / NAS_SUBPATH
-        if nas.exists():
-            base = nas
-    if base is None and DRIVE_FOLDER and Path(DRIVE_FOLDER).exists():
-        base = Path(DRIVE_FOLDER)
-    if base is None:
-        logger.warning("Export : destination indisponible (NAS non monté et dossier Synology Drive absent) — copie ignorée.")
+    # Destination : le lecteur réseau retenu, obligatoirement MONTÉ. Aucun repli local.
+    if not NAS_VOLUME:
+        logger.warning("Publication : aucun lecteur réseau choisi — copie ignorée.")
+        return
+    volume = Path(NAS_VOLUME)
+    if not volume.is_dir():
+        logger.warning(f"Publication : lecteur « {NAS_VOLUME} » non monté — copie ignorée. "
+                       f"Le résultat reste dans le dossier surveillé.")
+        return
+    base = volume / NAS_SUBPATH if NAS_SUBPATH else volume
+    if not base.is_dir():
+        logger.warning(f"Publication : sous-dossier « {NAS_SUBPATH} » absent du lecteur — copie ignorée.")
         return
     # Arborescence : tous les segments SAUF le dernier sont des dossiers (Eg / w / O0), le reste déposé dedans.
     parts = project_name.split(".")

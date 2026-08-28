@@ -34,11 +34,7 @@ struct SettingsView: View {
         return found
     }()
     // Champs NAS (édition locale, appliqués via « Enregistrer »).
-    @State private var nasHost: String = AppModel.shared.config.nasHost
-    @State private var nasShare: String = AppModel.shared.config.nasShare
     @State private var nasSubpath: String = AppModel.shared.config.nasSubpath
-    @State private var nasUser: String = AppModel.shared.config.nasUser
-    @State private var driveFolder: String = AppModel.shared.config.driveFolder
 
     // Binding pratique vers un booléen de la config (sauvegarde + application immédiate via model.update).
     private func toggle(_ kp: WritableKeyPath<AppConfig, Bool>) -> Binding<Bool> {
@@ -252,26 +248,57 @@ struct SettingsView: View {
                     }
                 }
 
-                Section("Destination (NAS)") {
-                    Toggle("Copier le résultat vers le NAS", isOn: toggle(\.exportEnabled))
+                Section("Destination (lecteur réseau)") {
+                    Toggle("Publier le résultat sur un lecteur réseau", isOn: toggle(\.exportEnabled))
                     if model.config.exportEnabled {
-                        TextField("Serveur (IP ou nom)", text: $nasHost).textFieldStyle(.roundedBorder)
-                        TextField("Partage SMB", text: $nasShare).textFieldStyle(.roundedBorder)
-                        TextField("Sous-dossier racine (optionnel)", text: $nasSubpath).textFieldStyle(.roundedBorder)
-                        TextField("Nom d'utilisateur", text: $nasUser).textFieldStyle(.roundedBorder)
-                        HStack {
-                            TextField("Dossier Synology Drive (repli)", text: $driveFolder).textFieldStyle(.roundedBorder)
-                            Button("Choisir…") { chooseDriveFolder() }
+                        // Liste des lecteurs SMB RÉELLEMENT montés. Le lecteur enregistré y figure même
+                        // s'il est démonté, pour rester visible et ne pas paraître perdu.
+                        Picker("Lecteur", selection: Binding(
+                            get: { model.config.nasVolumePath },
+                            set: { path in
+                                if let v = model.nasVolumes.first(where: { $0.path == path }) {
+                                    model.selectNASVolume(v)
+                                }
+                            })) {
+                            if model.config.nasVolumePath.isEmpty {
+                                Text("— aucun —").tag("")
+                            } else if !model.nasVolumes.contains(where: { $0.path == model.config.nasVolumePath }) {
+                                Text("\((model.config.nasVolumePath as NSString).lastPathComponent) (non monté)")
+                                    .tag(model.config.nasVolumePath)
+                            }
+                            ForEach(model.nasVolumes) { v in Text(v.name).tag(v.path) }
                         }
+                        .disabled(model.config.nasLocked)
+
                         HStack {
-                            Button("Enregistrer") { saveNAS() }
-                            Button("Se connecter au NAS") { saveNAS(); model.connectNAS() }
+                            Button("Actualiser la liste") { model.refreshNASVolumes() }
+                                .disabled(model.config.nasLocked)
+                            Button("Monter maintenant") { model.connectNAS() }
                             Spacer()
+                            Button {
+                                model.setNASLock(!model.config.nasLocked)
+                            } label: {
+                                Label(model.config.nasLocked ? "Déverrouiller" : "Verrouiller",
+                                      systemImage: model.config.nasLocked ? "lock.fill" : "lock.open")
+                            }
                         }
+
+                        TextField("Sous-dossier racine (optionnel)", text: $nasSubpath)
+                            .textFieldStyle(.roundedBorder)
+                            .disabled(model.config.nasLocked)
+                            .onSubmit { saveNAS() }
+                        if !model.config.nasLocked {
+                            Button("Enregistrer le sous-dossier") { saveNAS() }
+                        }
+
                         if !model.nasStatus.isEmpty {
                             Text(model.nasStatus).font(.caption).foregroundStyle(.secondary).lineLimit(2)
                         }
-                        Text("Le résultat est classé selon son nom (« Eg.w.O0.… » → dossiers Eg / w / O0). Le mot de passe est demandé par macOS (Trousseau) — jamais stocké par l'app. NAS prioritaire, Synology Drive en repli.")
+                        Text(model.config.nasLocked
+                             ? "🔒 Réglages verrouillés : le mot de passe administrateur du Mac est requis pour changer de lecteur."
+                             : "Seuls les lecteurs réseau SMB montés sont proposés. Le lecteur retenu est mémorisé et remonté automatiquement s'il a été éjecté ; le mot de passe du partage est demandé par macOS et conservé dans le Trousseau — jamais par l'application.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        Text("Le résultat est classé selon son nom (« Eg.w.O0.… » → dossiers Eg / w / O0). Sans lecteur monté, rien n'est publié : le PDF reste dans le dossier surveillé.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }
@@ -306,7 +333,11 @@ struct SettingsView: View {
         }
         // Liste des modèles Ollama : chargée à l'ouverture des préférences et à l'activation de la
         // fiche ISAD (pas au démarrage de l'app : inutile de solliciter Ollama tant qu'on n'y touche pas).
-        .onAppear { if model.config.isadEnabled { model.refreshOllamaModels() } }
+        .onAppear {
+            if model.config.isadEnabled { model.refreshOllamaModels() }
+            if model.config.exportEnabled { model.refreshNASVolumes() }
+        }
+        .onChange(of: model.config.exportEnabled) { _, on in if on { model.refreshNASVolumes() } }
         .onChange(of: model.config.isadEnabled) { _, enabled in
             if enabled { model.refreshOllamaModels() }
         }
@@ -378,13 +409,8 @@ struct SettingsView: View {
     }
 
     private func saveNAS() {
-        model.update {
-            $0.nasHost = nasHost.trimmingCharacters(in: .whitespaces)
-            $0.nasShare = nasShare.trimmingCharacters(in: .whitespaces)
-            $0.nasSubpath = nasSubpath.trimmingCharacters(in: .whitespaces)
-            $0.nasUser = nasUser.trimmingCharacters(in: .whitespaces)
-            $0.driveFolder = driveFolder.trimmingCharacters(in: .whitespaces)
-        }
+        guard !model.config.nasLocked else { return }
+        model.update { $0.nasSubpath = nasSubpath.trimmingCharacters(in: .whitespaces) }
     }
 
     // Filigrane image : même validation que le moteur (chemin ABSOLU + fichier existant), affichée à
@@ -415,16 +441,5 @@ struct SettingsView: View {
         }
     }
 
-    private func chooseDriveFolder() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        if !driveFolder.isEmpty { panel.directoryURL = URL(fileURLWithPath: driveFolder) }
-        if panel.runModal() == .OK, let url = panel.url {
-            driveFolder = url.path
-            saveNAS()
-        }
-    }
 
 }

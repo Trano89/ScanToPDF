@@ -21,8 +21,11 @@ final class AppModel: ObservableObject {
     // Ancien automatisme (com.fvjc.archivage) détecté sur ce Mac → à supprimer (doublon).
     @Published var legacyDetected = false
     @Published var legacyRemoving = false
-    // Export NAS : statut du montage affiché dans les réglages.
+    // Export NAS : lecteurs réseau détectés, lecteur retenu et statut affiché dans les réglages.
     @Published var nasStatus = ""
+    @Published var nasVolumes: [NetworkVolume] = []
+    private var nasRemountTask: Task<Void, Never>?
+    private var nasMountFailures = 0
     // Fiche ISAD : modèles Ollama installés sur ce Mac (menu des préférences) + statut de la recherche.
     @Published var ollamaModels: [String] = []
     @Published var ollamaStatus = ""
@@ -77,19 +80,84 @@ final class AppModel: ObservableObject {
         // Vérification GitHub : INDÉPENDANTE de la découverte LAN (elle fonctionne réseau local désactivé).
         updateService.setRemoteUpdates(config.remoteUpdateEnabled)
         checkLegacyAutomation()          // ancien service en doublon → proposer sa suppression
-        if config.exportEnabled { connectNAS() }             // monte le NAS (popup natif si besoin)
+        if config.exportEnabled { connectNAS(); startNASWatch() }   // remonte le lecteur enregistré
     }
 
     // MARK: - export NAS : montage du partage (popup de login natif macOS si nécessaire)
-    func connectNAS() {
-        let host = config.nasHost, share = config.nasShare, user = config.nasUser
-        guard config.exportEnabled else { return }
-        guard !share.isEmpty else { nasStatus = "Renseignez le nom du partage SMB."; return }
-        nasStatus = "Connexion au NAS \(host)…"
+    /// Relit les lecteurs réseau SMB montés (liste déroulante des préférences).
+    func refreshNASVolumes() {
+        nasVolumes = MountManager.networkVolumes()
+        if nasVolumes.isEmpty && config.nasVolumePath.isEmpty {
+            nasStatus = "Aucun lecteur réseau monté — connectez-le dans le Finder, puis actualisez."
+        }
+    }
+
+    /// Retient un lecteur comme destination. Refusé tant que le verrou administrateur est en place.
+    func selectNASVolume(_ volume: NetworkVolume) {
+        guard !config.nasLocked else {
+            nasStatus = "Réglages verrouillés — déverrouillez pour changer de lecteur."
+            return
+        }
+        update { $0.nasVolumePath = volume.path; $0.nasMountFrom = volume.mountFrom }
+        nasMountFailures = 0
+        nasStatus = "Lecteur retenu : \(volume.name)"
+    }
+
+    /// Pose ou retire le verrou. Le RETRAIT exige le mot de passe administrateur du Mac (comme le
+    /// cadenas des Réglages Système) ; le poser n'a évidemment pas à être protégé.
+    func setNASLock(_ locked: Bool) {
+        if locked { update { $0.nasLocked = true }; nasStatus = "Réglages du lecteur verrouillés."; return }
+        nasStatus = "Déverrouillage…"
         Task.detached { [weak self] in
-            let path = MountManager.ensureMounted(host: host, share: share, user: user)
-            let message = path.map { "NAS monté : \($0)" } ?? "NAS non monté (le repli Synology Drive sera utilisé)."
-            await MainActor.run { [weak self] in self?.nasStatus = message }
+            let ok = AdminAuth.authenticate(reason: "ScanToPDF veut déverrouiller le choix du lecteur réseau.")
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                if ok { self.update { $0.nasLocked = false }; self.nasStatus = "Réglages déverrouillés." }
+                else { self.nasStatus = "Déverrouillage refusé." }
+            }
+        }
+    }
+
+    /// Monte le lecteur enregistré s'il ne l'est plus.
+    func connectNAS() {
+        let path = config.nasVolumePath, from = config.nasMountFrom
+        guard config.exportEnabled else { return }
+        guard !path.isEmpty else { nasStatus = "Choisissez d'abord un lecteur réseau."; return }
+        if MountManager.isMounted(path: path) { nasStatus = "Lecteur monté : \(path)"; return }
+        nasStatus = "Montage de \(path)…"
+        Task.detached { [weak self] in
+            let ok = MountManager.remount(path: path, mountFrom: from)
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.nasMountFailures = ok ? 0 : self.nasMountFailures + 1
+                self.nasStatus = ok ? "Lecteur monté : \(path)"
+                                    : "Lecteur injoignable — rien ne sera publié tant qu'il n'est pas monté."
+                self.refreshNASVolumes()
+            }
+        }
+    }
+
+    /// Remonte le lecteur enregistré en arrière-plan s'il a été éjecté. Trois échecs consécutifs
+    /// suspendent les tentatives : mieux vaut un statut explicite qu'un dialogue de connexion qui
+    /// resurgit toutes les cinq minutes.
+    private func startNASWatch() {
+        nasRemountTask?.cancel()
+        guard config.exportEnabled, !config.nasVolumePath.isEmpty else { return }
+        nasRemountTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 300_000_000_000)   // 5 min
+                guard let self else { return }
+                let (path, from, tries) = await MainActor.run {
+                    (self.config.nasVolumePath, self.config.nasMountFrom, self.nasMountFailures)
+                }
+                if path.isEmpty || tries >= 3 || MountManager.isMounted(path: path) { continue }
+                let ok = MountManager.remount(path: path, mountFrom: from, timeout: 10)
+                await MainActor.run { [weak self] in
+                    guard let self else { return }
+                    self.nasMountFailures = ok ? 0 : self.nasMountFailures + 1
+                    if ok { self.nasStatus = "Lecteur remonté : \(path)" }
+                }
+            }
         }
     }
 
