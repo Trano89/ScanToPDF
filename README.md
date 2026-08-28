@@ -28,6 +28,14 @@ ScanToPDF automates the processing of bulk document scans. Instead of manually a
 
 ## Changelog
 
+### v1.0.20 — Network publication rebuilt around the drive
+
+- The destination is now picked from a **drop-down of the SMB drives actually mounted**; internal
+  mounts (Time Machine, `nobrowse`) are filtered out
+- The chosen drive is remembered and **remounted on its own** when it has been ejected
+- Changing the drive can be **locked behind the Mac administrator password**
+- The Synology Drive fallback is removed: with no drive mounted, nothing is published
+
 ### v1.0.19 — ISAD(G) finding aid formatting fix
 - Wider wrap width (120 vs 78 chars) for **Histoire Archivistique** and **Portée et Contenu** fields in the ISAD sidecar `.txt` file, so multi-sentence descriptions no longer break at arbitrary line lengths
 
