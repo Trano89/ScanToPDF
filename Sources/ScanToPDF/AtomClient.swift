@@ -12,6 +12,7 @@ struct AtomRecord: Equatable {
     var places: [String] = []    // Mots-clés — lieux
     var names: [String] = []     // Mots-clés — noms
     var genres: [String] = []    // Mots-clés — genres
+    var repository = ""          // Dépôt — l'import CSV apparie sur cote + titre + dépôt
 }
 
 /// Différence entre la notice en ligne et ce que ScanToPDF propose, champ par champ.
@@ -24,11 +25,8 @@ struct AtomFieldDiff: Identifiable {
     var proposed: String        // modifiable à la volée avant validation
     var kind: Kind { existing == proposed ? .unchanged : (existing.isEmpty ? .added : .modified) }
     var id: String { key }
-    /// Les points d'accès ne sont PAS du texte : AtoM attend l'URL de terme de son thésaurus
-    /// (`routing->generate([term, 'module' => 'term'])`) et relit chaque valeur avec
-    /// `routing->parse()`. Y écrire des libellés ne publiait rien et détruisait les termes en place.
-    /// Ils restent affichés — la fiche les propose — mais ne partent pas dans le formulaire.
-    var writable: Bool { !key.hasSuffix("AccessPoints") }
+    /// Publiable tel quel : l'import CSV d'AtoM accepte les mots-clés en texte, séparés par « | ».
+    var writable: Bool { true }
 }
 
 /// Accès à l'instance AtoM. Tout passe par HTTPS ; la lecture d'une notice publique ne demande
@@ -135,6 +133,9 @@ enum AtomClient {
         r.places          = accessPoints(html, "placeAccessPoints")
         r.names           = accessPoints(html, "nameAccessPoints")
         r.genres          = accessPoints(html, "genreAccessPoints")
+        // Le dépôt n'est pas toujours porté par la notice : AtoM l'hérite du fonds et l'affiche
+        // ici. L'import CSV, lui, remonte l'arborescence pour le retrouver.
+        r.repository      = field(html, "Dépôt")
         return r
     }
 
@@ -381,6 +382,183 @@ enum AtomClient {
                 if !msg.isEmpty { log("  refus AtoM : " + msg) }
             }
         }
+    }
+
+
+    // MARK: - Publication par IMPORT CSV — la voie d'écriture documentée par AtoM
+    //
+    // AtoM n'a pas d'API REST d'écriture pour les descriptions : ses points d'accès REST se
+    // limitent à la lecture (parcourir, lire, télécharger) et le greffon n'est même pas activé ici.
+    // La méthode officielle est l'import CSV, disponible dans l'interface web, avec deux options
+    // qui correspondent exactement au besoin :
+    //   • updateType = match-and-update → met à jour la notice EN PLACE, les colonnes vides du CSV
+    //     étant ignorées (on n'écrase donc jamais un champ qu'on ne remplit pas) ;
+    //   • skipUnmatched = on → si aucune notice ne correspond, la ligne est ignorée. Aucune
+    //     création n'est possible, ce qui est la règle posée pour ce catalogue.
+    // L'appariement se fait sur cote + titre + dépôt (QubitInformationObject::getByTitleIdentifierAndRepo),
+    // le dépôt étant résolu par héritage en remontant l'arborescence.
+    // Avantage décisif : dans un CSV, les mots-clés sont du TEXTE, séparés par « | » — AtoM résout
+    // lui-même les termes, là où le formulaire d'édition exigeait des URL de thésaurus.
+    // L'import s'exécute en tâche de fond (Gearman) : on suit le compte rendu du travail.
+
+    /// Colonnes du gabarit ISAD livré avec AtoM. L'ordre n'importe pas, les noms si.
+    private static let csvColumns = [
+        "legacyId", "parentId", "qubitParentSlug", "accessionNumber", "identifier", "title",
+        "levelOfDescription", "extentAndMedium", "repository", "archivalHistory", "acquisition",
+        "scopeAndContent", "appraisal", "accruals", "arrangement", "accessConditions",
+        "reproductionConditions", "language", "script", "languageNote", "physicalCharacteristics",
+        "findingAids", "locationOfOriginals", "locationOfCopies", "relatedUnitsOfDescription",
+        "publicationNote", "digitalObjectPath", "digitalObjectURI", "generalNote",
+        "subjectAccessPoints", "placeAccessPoints", "nameAccessPoints", "genreAccessPoints",
+        "descriptionIdentifier", "institutionIdentifier", "rules", "descriptionStatus",
+        "levelOfDetail", "revisionHistory", "languageOfDescription", "scriptOfDescription",
+        "sources", "archivistNote", "publicationStatus", "culture",
+    ]
+
+    private static func csvCell(_ v: String) -> String {
+        let flat = v.replacingOccurrences(of: "\r\n", with: "\n")
+        guard flat.contains(",") || flat.contains("\"") || flat.contains("\n") else { return flat }
+        return "\"" + flat.replacingOccurrences(of: "\"", with: "\"\"") + "\""
+    }
+
+    static func buildCSV(_ values: [String: String]) -> String {
+        let header = csvColumns.joined(separator: ",")
+        let row = csvColumns.map { csvCell(values[$0] ?? "") }.joined(separator: ",")
+        return header + "\n" + row + "\n"
+    }
+
+    private static func multipart(_ fields: [(String, String)], fileName: String, csv: String,
+                                  boundary: String) -> Data {
+        var d = Data()
+        func add(_ s: String) { d.append(s.data(using: .utf8)!) }
+        for (n, v) in fields {
+            add("--\(boundary)\r\nContent-Disposition: form-data; name=\"\(n)\"\r\n\r\n\(v)\r\n")
+        }
+        add("--\(boundary)\r\nContent-Disposition: form-data; name=\"file\"; filename=\"\(fileName)\"\r\n")
+        add("Content-Type: text/csv\r\n\r\n")
+        add(csv)
+        add("\r\n--\(boundary)--\r\n")
+        return d
+    }
+
+    /// Envoie le CSV à l'import d'AtoM et rend l'identifiant du travail lancé.
+    private static func startImport(base: URL, csv: String, code: String) async -> Result<String, AtomError> {
+        let formURL = URL(string: base.absoluteString + "/index.php/object/importSelect?type=csv")!
+        guard let page = await get(formURL) else {
+            log("page d'import inaccessible — non connecté ou droits insuffisants")
+            return .failure(.formUnavailable)
+        }
+        guard let form = isolateForm(page, actionContains: "importSelect"),
+              let token = firstMatch(form, "name=\"_csrf_token\"[^>]*value=\"([^\"]*)\"")
+                       ?? firstMatch(form, "value=\"([^\"]*)\"[^>]*name=\"_csrf_token\"") else {
+            log("formulaire d'import introuvable dans la page")
+            return .failure(.formUnavailable)
+        }
+        let boundary = "----ScanToPDF\(UInt32.random(in: 0..<UInt32.max))"
+        let fields = [("_csrf_token", token),
+                      ("importType", "csv"),
+                      ("objectType", "informationObject"),
+                      ("updateType", "match-and-update"),
+                      ("skipUnmatched", "on")]
+        var req = URLRequest(url: URL(string: base.absoluteString + "/index.php/object/importSelect")!)
+        req.httpMethod = "POST"
+        req.timeoutInterval = 60
+        req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        req.httpBody = multipart(fields, fileName: code + ".csv", csv: csv, boundary: boundary)
+        log("import CSV : envoi de \(csv.count) octets — match-and-update, skipUnmatched")
+        guard let (data, resp) = try? await URLSession.shared.upload(for: req, from: req.httpBody!) else {
+            return .failure(.rejected("aucune réponse du serveur"))
+        }
+        let body = String(data: data, encoding: .utf8) ?? ""
+        let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        try? body.data(using: .utf8)?
+            .write(to: URL(fileURLWithPath: "/Users/Shared/ScanToPDF/atom_reponse.html"))
+        guard let job = firstMatch(body, "jobs/report/id/([0-9]+)") else {
+            if let err = firstMatch(body, "<div class=\"[^\"]*alert-danger[^\"]*\">(.*?)</div>") {
+                log("import refusé par AtoM : " + plain(err))
+                return .failure(.rejected(plain(err)))
+            }
+            log("import : aucun travail lancé (HTTP \(status)) — réponse dans atom_reponse.html")
+            return .failure(.rejected("AtoM n'a pas lancé l'import (droits d'import manquants ?)"))
+        }
+        log("import CSV accepté — travail n° \(job)")
+        return .success(job)
+    }
+
+    /// Suit le compte rendu du travail jusqu'à son terme. L'import tourne en tâche de fond : sans
+    /// ouvrier (Gearman) actif côté serveur, il reste en attente — on le dit alors clairement.
+    private static func awaitImport(base: URL, job: String) async -> Result<Void, AtomError> {
+        let url = URL(string: base.absoluteString + "/index.php/jobs/report/id/" + job)!
+        for attempt in 1...30 {
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            guard let html = await get(url) else { continue }
+            let text = plain(html)
+            if text.contains("Skipping record") || text.contains("Unable to match") {
+                log("travail \(job) : notice NON appariée — AtoM a ignoré la ligne")
+                return .failure(.rejected("aucune notice appariée dans AtoM (cote, titre ou dépôt différents)"))
+            }
+            if text.contains("Completed") || text.contains("Terminé") {
+                log("travail \(job) : terminé après \(attempt * 2) s")
+                return .success(())
+            }
+            if text.contains("Error") || text.contains("Erreur") {
+                log("travail \(job) : en erreur — voir atom_reponse.html")
+                try? html.data(using: .utf8)?
+                    .write(to: URL(fileURLWithPath: "/Users/Shared/ScanToPDF/atom_reponse.html"))
+                return .failure(.rejected("l'import a échoué côté AtoM (voir le journal du travail n° \(job))"))
+            }
+        }
+        log("travail \(job) : toujours en attente après 60 s")
+        return .failure(.rejected("import en attente depuis 60 s — aucun ouvrier AtoM (Gearman) ne semble actif"))
+    }
+
+    /// Publie une notice par import CSV, puis VÉRIFIE par relecture que la notice a bien changé.
+    static func publishViaCsv(base: URL, slug: String, record: AtomRecord,
+                              changes: [String: String]) async -> Result<Void, AtomError> {
+        var values: [String: String] = [
+            "identifier": bareCode(record.identifier, fallback: ""),
+            "title": record.title,
+            "repository": record.repository,
+            "culture": "fr",
+        ]
+        for (k, v) in changes { values[k] = v }
+        guard !values["identifier"]!.isEmpty, !values["title"]!.isEmpty else {
+            return .failure(.rejected("cote ou titre absent de la notice — appariement impossible"))
+        }
+        log("import CSV de « \(values["identifier"]!) » — titre « \(values["title"]!) », dépôt « \(record.repository)"
+            + "\(record.repository.isEmpty ? " (absent : appariement sur cote + titre seuls)" : "")»")
+        let csv = buildCSV(values)
+        try? csv.data(using: .utf8)?
+            .write(to: URL(fileURLWithPath: "/Users/Shared/ScanToPDF/atom_import.csv"))
+        switch await startImport(base: base, csv: csv, code: values["identifier"]!) {
+        case .failure(let e): return .failure(e)
+        case .success(let job):
+            if case .failure(let e) = await awaitImport(base: base, job: job) { return .failure(e) }
+        }
+        return await verifySaved(base: base, slug: slug, changes: changes)
+    }
+
+    /// Un import « terminé » ne prouve pas que NOTRE notice a changé : on relit et on compare.
+    private static func verifySaved(base: URL, slug: String,
+                                    changes: [String: String]) async -> Result<Void, AtomError> {
+        guard let after = await get(base.appendingPathComponent("index.php/" + slug)) else {
+            return .failure(.rejected("enregistrement non vérifiable (notice illisible après import)"))
+        }
+        let saved = parseRecord(after)
+        let control = [("extentAndMedium", saved.extentAndMedium),
+                       ("archivalHistory", saved.archivalHistory),
+                       ("scopeAndContent", saved.scopeAndContent)]
+        for (key, now) in control {
+            guard let expected = changes[key] else { continue }
+            let a = now.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespaces)
+            let b = expected.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespaces)
+            if a != b {
+                log("ÉCHEC : « \(key) » vaut toujours « \(a.prefix(60)) » après import")
+                return .failure(.rejected("la notice n'a pas été modifiée par l'import"))
+            }
+        }
+        log("import VÉRIFIÉ par relecture de la notice")
+        return .success(())
     }
 
     static func submitEdit(base: URL, slug: String, changes: [String: String]) async -> Result<Void, AtomError> {

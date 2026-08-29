@@ -90,11 +90,6 @@ struct AtomPublishView: View {
                     .font(.caption).foregroundStyle(.secondary)
                     .textSelection(.enabled).lineLimit(4)
             }
-            if !f.wrappedValue.writable && f.wrappedValue.kind != .unchanged {
-                Text("À saisir dans AtoM : les mots-clés renvoient à des termes du thésaurus, "
-                     + "pas à du texte libre. ScanToPDF ne les écrit pas.")
-                    .font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
-            }
             if f.wrappedValue.multiline {
                 TextEditor(text: f.proposed)
                     .font(.system(size: 12)).frame(height: 90)

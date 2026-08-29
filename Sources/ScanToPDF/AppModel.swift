@@ -391,7 +391,7 @@ final class AppModel: ObservableObject {
                 return prefix + code
             } ?? code
             var p = AtomPublication(code: code, folder: folder, pdf: pdf,
-                                    proposed: proposed,
+                                    proposed: proposed, existing: match?.record ?? AtomRecord(),
                                     slug: match?.slug, matchedCode: match?.matchedCode ?? code)
             p.fields = AtomClient.diff(existing: match?.record, proposed: proposed)
             await MainActor.run { [weak self] in
@@ -437,7 +437,7 @@ final class AppModel: ObservableObject {
                 "aucune notice cible — ScanToPDF ne crée jamais de notice"))
         }
         AtomClient.log("publication de « \(p.code) » vers /\(slug) — champs : \(p.changes.keys.sorted().joined(separator: ", "))")
-        switch await AtomClient.submitEdit(base: base, slug: slug, changes: p.changes) {
+        switch await AtomClient.publishViaCsv(base: base, slug: slug, record: p.existing, changes: p.changes) {
         case .success:
             AtomClient.log("✅ « \(p.code) » publié et vérifié")
             return .success(())
