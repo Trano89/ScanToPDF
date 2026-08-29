@@ -518,7 +518,7 @@ enum AtomClient {
     }
 
     /// Publie une notice par import CSV, puis VÉRIFIE par relecture que la notice a bien changé.
-    static func publishViaCsv(base: URL, slug: String, record: AtomRecord,
+    static func publishViaCsv(base: URL, slug: String, record: AtomRecord, pdf: URL,
                               changes: [String: String]) async -> Result<Void, AtomError> {
         // La « Cote » affichée par AtoM est la cote de RÉFÉRENCE : pays, dépôt et cotes des parents
         // assemblés (« CH FVJC Zz.z.Z1.2026_1 »). L'appariement de l'import porte sur la cote PROPRE
@@ -548,7 +548,84 @@ enum AtomClient {
         case .success(let job):
             if case .failure(let e) = await awaitImport(base: base, job: job) { return .failure(e) }
         }
-        return await verifySaved(base: base, slug: slug, changes: changes)
+        if case .failure(let e) = await verifySaved(base: base, slug: slug, changes: changes) {
+            return .failure(e)
+        }
+        // Les données sont en ligne ; reste le PDF/A, seul fichier publié dans AtoM.
+        return await attachPDF(base: base, slug: slug, pdf: pdf)
+    }
+
+
+    /// Attache le PDF/A final à la notice. AtoM n'accepte QU'UN objet numérique par description :
+    /// si la notice en porte déjà un, sa page d'ajout redirige vers l'édition de cet objet — on le
+    /// détecte et on conserve l'existant plutôt que de l'écraser.
+    /// Route et champs vérifiés dans apps/qubit/modules/object/addDigitalObjectAction.class.php.
+    static func attachPDF(base: URL, slug: String, pdf: URL) async -> Result<Void, AtomError> {
+        guard let data = try? Data(contentsOf: pdf) else {
+            log("PDF illisible : \(pdf.lastPathComponent)")
+            return .failure(.rejected("PDF introuvable sur le disque"))
+        }
+        let pageURL = base.appendingPathComponent("index.php/" + slug + "/object/addDigitalObject")
+        var req = URLRequest(url: pageURL)
+        req.timeoutInterval = 30
+        guard let (pd, presp) = try? await URLSession.shared.data(for: req) else {
+            return .failure(.rejected("page d'ajout d'objet numérique inaccessible"))
+        }
+        let page = String(data: pd, encoding: .utf8) ?? ""
+        // Redirigé vers l'édition d'un objet numérique = la notice en porte déjà un.
+        if (presp.url?.absoluteString ?? "").contains("/digitalobject/") {
+            log("objet numérique DÉJÀ présent sur /\(slug) — conservé, aucun remplacement")
+            return .success(())
+        }
+        guard let form = isolateForm(page, actionContains: "addDigitalObject"),
+              let token = firstMatch(form, "name=\"_csrf_token\"[^>]*value=\"([^\"]*)\"")
+                       ?? firstMatch(form, "value=\"([^\"]*)\"[^>]*name=\"_csrf_token\"") else {
+            log("formulaire d'ajout d'objet numérique introuvable (droits insuffisants ?)")
+            return .failure(.formUnavailable)
+        }
+        let boundary = "----ScanToPDF\(UInt32.random(in: 0..<UInt32.max))"
+        var body = Data()
+        func add(_ t: String) { body.append(t.data(using: .utf8)!) }
+        add("--\(boundary)\r\nContent-Disposition: form-data; name=\"_csrf_token\"\r\n\r\n\(token)\r\n")
+        add("--\(boundary)\r\nContent-Disposition: form-data; name=\"file\"; filename=\"\(pdf.lastPathComponent)\"\r\n")
+        add("Content-Type: application/pdf\r\n\r\n")
+        body.append(data)
+        add("\r\n--\(boundary)--\r\n")
+
+        var post = URLRequest(url: pageURL)
+        post.httpMethod = "POST"
+        post.timeoutInterval = 300          // un PDF/A de plusieurs Mo sur une liaison lente
+        post.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        log("envoi du PDF « \(pdf.lastPathComponent) » (\(data.count / 1024) Ko) vers /\(slug)")
+        guard let (rd, rresp) = try? await URLSession.shared.upload(for: post, from: body) else {
+            return .failure(.rejected("envoi du PDF interrompu"))
+        }
+        let answer = String(data: rd, encoding: .utf8) ?? ""
+        let landed = rresp.url?.absoluteString ?? ""
+        // Succès : AtoM redirige vers la notice. Échec : il re-rend le formulaire d'ajout.
+        if landed.contains("addDigitalObject") {
+            try? answer.data(using: .utf8)?
+                .write(to: URL(fileURLWithPath: "/Users/Shared/ScanToPDF/atom_reponse.html"))
+            let why = firstMatch(answer, "<ul class=\"error_list\">(.*?)</ul>")
+                   ?? firstMatch(answer, "<div class=\"[^\"]*alert-danger[^\"]*\">(.*?)</div>")
+            log("PDF REFUSÉ : " + (why.map(plain) ?? "formulaire re-rendu, voir atom_reponse.html"))
+            return .failure(.rejected("AtoM a refusé le PDF" + (why.map { " : " + plain($0) } ?? "")))
+        }
+        // AtoM ne redirige vers la notice QUE si le formulaire a été validé et l'objet enregistré
+        // (addDigitalObjectAction : isValid → processForm → save → redirect). On relit tout de même
+        // la notice pour confirmer. L'affichage d'un objet numérique dépendant du thème, l'absence
+        // d'indice est signalée comme un doute à lever, non comme un échec : ce serait mentir dans
+        // l'autre sens que de déclarer perdu un fichier qu'AtoM a bel et bien enregistré.
+        let marks = ["uploads/r/", "digital-object", "digitalObject", "/digitalobject/"]
+        if let after = await get(base.appendingPathComponent("index.php/" + slug)) {
+            if marks.contains(where: after.contains) {
+                log("✅ PDF attaché et vérifié sur /\(slug)")
+            } else {
+                log("PDF accepté par AtoM (redirection vers la notice) mais aucun objet numérique "
+                    + "visible à la relecture — à contrôler sur la notice")
+            }
+        }
+        return .success(())
     }
 
     /// Un import « terminé » ne prouve pas que NOTRE notice a changé : on relit et on compare.

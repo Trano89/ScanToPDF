@@ -437,7 +437,8 @@ final class AppModel: ObservableObject {
                 "aucune notice cible — ScanToPDF ne crée jamais de notice"))
         }
         AtomClient.log("publication de « \(p.code) » vers /\(slug) — champs : \(p.changes.keys.sorted().joined(separator: ", "))")
-        switch await AtomClient.publishViaCsv(base: base, slug: slug, record: p.existing, changes: p.changes) {
+        switch await AtomClient.publishViaCsv(base: base, slug: slug, record: p.existing,
+                                              pdf: p.pdf, changes: p.changes) {
         case .success:
             AtomClient.log("✅ « \(p.code) » publié et vérifié")
             return .success(())
