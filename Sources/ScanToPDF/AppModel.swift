@@ -29,6 +29,10 @@ final class AppModel: ObservableObject {
     // Publication AtoM : notice en attente de validation et statut.
     @Published var atomPending: AtomPublication?
     private var atomQueue: [AtomPublication] = []   // un même passage peut terminer plusieurs projets
+    /// Session AtoM ouverte pour CETTE exécution de l'application. Remise à zéro à chaque démarrage :
+    /// la connexion est redemandée au premier traitement, jamais conservée d'une session à l'autre.
+    @Published private(set) var atomSessionReady = false
+    private var atomLoginWindow: NSWindow?
     @Published var atomStatus = ""
     private var atomWindow: NSWindow?
     // Fiche ISAD : modèles Ollama installés sur ce Mac (menu des préférences) + statut de la recherche.
@@ -286,9 +290,61 @@ final class AppModel: ObservableObject {
         prepareAtomPublication(pdf: pdf)
     }
 
+    /// Ouvre la session AtoM. Renvoie un message d'échec explicite plutôt qu'un simple « refusé ».
+    /// Renvoie nil en cas de succès, sinon le motif de l'échec.
+    func openAtomSession(email: String, password: String, remember: Bool) async -> String? {
+        guard let base = URL(string: config.atomBaseURL), base.scheme == "https" else {
+            return "Adresse invalide : seul HTTPS est accepté."
+        }
+        let ok = await AtomClient.login(base: base, email: email, password: password)
+        return await MainActor.run {
+            if ok {
+                self.atomSessionReady = true
+                self.update { $0.atomEmail = email }
+                if remember { _ = AtomCredentials.save(email: email, password: password) }
+                self.atomStatus = "Session AtoM ouverte."
+                return nil
+            }
+            self.atomStatus = "Connexion à AtoM refusée."
+            return "Connexion refusée par AtoM — courriel ou mot de passe incorrect, ou compte sans droit d'édition." 
+        }
+    }
+
+    /// S'assure qu'une session est ouverte, en demandant la connexion au PREMIER traitement.
+    /// `done(false)` signifie que l'utilisateur a renoncé : la publication est alors abandonnée.
+    private func ensureAtomSession(_ done: @escaping (Bool) -> Void) {
+        if atomSessionReady { done(true); return }
+        // Une seule fenêtre de connexion à la fois, même si plusieurs projets se terminent d'affilée.
+        if atomLoginWindow != nil { done(false); return }
+        let email = config.atomEmail
+        let saved = AtomCredentials.password(for: email) ?? ""
+        let view = AtomLoginView(email: email, password: saved, remember: !saved.isEmpty) { [weak self] ok in
+            guard let self else { return }
+            self.atomLoginWindow?.close(); self.atomLoginWindow = nil
+            done(ok)
+        }.environmentObject(self)
+        let w = NSWindow(contentViewController: NSHostingController(rootView: view))
+        w.title = "Connexion à AtoM"
+        w.styleMask = [.titled, .closable]
+        w.isReleasedWhenClosed = false
+        w.center()
+        atomLoginWindow = w
+        NSApp.activate(ignoringOtherApps: true)
+        w.makeKeyAndOrderFront(nil)
+    }
+
     /// Construit la comparaison entre la notice AtoM (si elle existe, dans ses DEUX écritures de cote)
     /// et ce que propose la fiche ISAD, puis ouvre l'écran de confirmation.
     func prepareAtomPublication(pdf: URL) {
+        // La connexion est demandée au PREMIER traitement de cette exécution ; renoncer annule la
+        // publication mais ne touche en rien au PDF ni à la copie sur le lecteur réseau.
+        ensureAtomSession { [weak self] ok in
+            guard ok else { self?.atomStatus = "Publication AtoM ignorée (non connecté)."; return }
+            self?.lookupAtomPublication(pdf: pdf)
+        }
+    }
+
+    private func lookupAtomPublication(pdf: URL) {
         let folder = pdf.deletingLastPathComponent()
         let code = pdf.deletingPathExtension().lastPathComponent
         guard let base = URL(string: config.atomBaseURL) else { return }
@@ -326,12 +382,13 @@ final class AppModel: ObservableObject {
         guard base.scheme == "https" else {
             return .failure(AtomClient.AtomError.rejected("seul HTTPS est accepté pour publier"))
         }
-        let email = config.atomEmail
-        guard let password = AtomCredentials.password(for: email) else {
-            return .failure(AtomClient.AtomError.notLoggedIn)
-        }
+        // La session a été ouverte au premier traitement ; si le serveur l'a expirée entre-temps,
+        // on la rouvre avec le mot de passe conservé, à défaut on redemande la connexion.
         if await !AtomClient.isLoggedIn(base: base) {
-            guard await AtomClient.login(base: base, email: email, password: password) else {
+            let email = config.atomEmail
+            guard let password = AtomCredentials.password(for: email),
+                  await AtomClient.login(base: base, email: email, password: password) else {
+                await MainActor.run { self.atomSessionReady = false }
                 return .failure(AtomClient.AtomError.notLoggedIn)
             }
         }

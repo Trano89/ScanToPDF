@@ -28,6 +28,14 @@ ScanToPDF automates the processing of bulk document scans. Instead of manually a
 
 ## Changelog
 
+### v1.1.0 — AtoM login asked once per run
+
+- A **login window** now asks for the AtoM credentials at the **first processing after each start**
+  of ScanToPDF; the session stays open until the app is quit, and the question is asked again on the
+  next launch
+- Declining simply skips the publication — the PDF and the copy to the network drive are untouched
+- Storing the password in the Keychain is now optional: it only pre-fills that window
+
 ### v1.0.23 — No record is ever created
 
 - ScanToPDF never creates a description: the catalogue stays in charge of its own hierarchy

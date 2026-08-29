@@ -325,7 +325,7 @@ struct SettingsView: View {
                     TextField("Courriel du compte AtoM", text: b(\.atomEmail))
                         .textFieldStyle(.roundedBorder)
                     HStack {
-                        SecureField("Mot de passe", text: $atomPassword)
+                        SecureField("Mot de passe (facultatif)", text: $atomPassword)
                             .textFieldStyle(.roundedBorder)
                         Button("Enregistrer") {
                             _ = AtomCredentials.save(email: draft.atomEmail, password: atomPassword)
@@ -333,6 +333,8 @@ struct SettingsView: View {
                         }
                         .disabled(draft.atomEmail.isEmpty || atomPassword.isEmpty)
                     }
+                    Text("La connexion est demandée dans une fenêtre au PREMIER traitement suivant chaque démarrage de ScanToPDF, et reste valable jusqu'à la fermeture de l'application. Enregistrer le mot de passe ici ne fait que le pré-remplir dans cette fenêtre.")
+                        .font(.caption).foregroundStyle(.secondary)
                     HStack {
                         Button("Tester la connexion") { model.testAtomLogin() }
                             .disabled(draft.atomEmail.isEmpty)
