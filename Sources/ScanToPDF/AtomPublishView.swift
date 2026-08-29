@@ -164,6 +164,8 @@ struct AtomPublishView: View {
                                  : (message.isEmpty ? Color.secondary : Color.orange))
                 .lineLimit(2)
             Spacer()
+            Button("Journal") { model.openAtomLog() }
+                .help("Ouvre atom.log : le détail de la connexion, des champs du formulaire et du résultat")
             Button("Annuler") { onClose() }
             Button("Mettre à jour dans AtoM") { publish() }
                 .buttonStyle(.borderedProminent)

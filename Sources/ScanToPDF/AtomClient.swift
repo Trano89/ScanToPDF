@@ -35,6 +35,11 @@ struct AtomFieldDiff: Identifiable {
 /// authentifiée, puis envoi du formulaire d'édition.
 enum AtomClient {
 
+    /// Journal dédié : /Users/Shared/ScanToPDF/atom.log. Sans lui, un échec de publication est
+    /// indiagnosticable — c'est exactement ce qui s'est produit.
+    static func log(_ s: String) { FileLog.append(s, to: "atom.log") }
+
+
     /// Les deux écritures possibles d'une même cote. L'ancienne convention du fonds sépare le numéro
     /// de document par « / » (Be.a.S1.1989/1), la nouvelle par « _ » (Be.a.S1.1989_1). AtoM ne doit
     /// contenir qu'UNE notice par document : il faut donc chercher les deux avant de conclure qu'elle
@@ -305,8 +310,10 @@ enum AtomClient {
         let form = isolateForm(page, actionContains: "user/login") ?? page
         let token = inputValue(form, name: "_csrf_token") ?? ""
         let body = ["email": email, "password": password, "_csrf_token": token, "next": ""]
-        guard let html = await post(loginURL, fields: body) else { return false }
-        return html.contains("user/logout") || !html.contains("name=\"password\"")
+        guard let html = await post(loginURL, fields: body) else { log("connexion : aucune r\u{e9}ponse"); return false }
+        let ok = html.contains("user/logout") || !html.contains("name=\"password\"")
+        log("connexion « " + email + " » : " + (ok ? "OK" : "REFUS\u{c9}E") + " (jeton " + String(token.count) + " car.)")
+        return ok
     }
 
     static func isLoggedIn(base: URL) async -> Bool {
@@ -317,9 +324,14 @@ enum AtomClient {
     /// Champs du formulaire d'édition, DÉCOUVERTS et non devinés : une divergence de gabarit doit
     /// être signalée, jamais silencieusement ignorée.
     static func editFormFields(base: URL, slug: String) async -> [(name: String, value: String)]? {
-        guard let html = await get(base.appendingPathComponent("index.php/" + slug + "/edit")),
-              let form = isolateForm(html, actionContains: slug + "/edit") ?? isolateForm(html, actionContains: "/edit")
-        else { return nil }
+        guard let html = await get(base.appendingPathComponent("index.php/" + slug + "/edit")) else {
+            log("formulaire d'\u{e9}dition inaccessible pour /" + slug + " (non connect\u{e9} ou droits insuffisants)")
+            return nil
+        }
+        guard let form = isolateForm(html, actionContains: slug + "/edit") ?? isolateForm(html, actionContains: "/edit") else {
+            log("aucun formulaire d'\u{e9}dition dans la page /" + slug + "/edit")
+            return nil
+        }
         return formFields(form)
     }
 
@@ -327,20 +339,53 @@ enum AtomClient {
     /// Symfony partiellement soumis EFFACE ce qu'il ne reçoit pas.
     static func submitEdit(base: URL, slug: String, changes: [String: String]) async -> Result<Void, AtomError> {
         guard var fields = await editFormFields(base: base, slug: slug) else { return .failure(.formUnavailable) }
+        log("champs du formulaire (" + String(fields.count) + ") : "
+            + fields.map { $0.name }.joined(separator: ", "))
         var missing: [String] = []
         for (name, value) in changes {
-            if let i = fields.firstIndex(where: { $0.name == name }) { fields[i].value = value }
-            else if let i = fields.firstIndex(where: { $0.name == name + "[]" }) { fields[i].value = value }
+            // AtoM nomme parfois ses champs « objet[champ] » ou « champ[] » : on accepte ces formes
+            // plutôt que d'échouer sur une différence de gabarit.
+            let i = fields.firstIndex { $0.name == name }
+                ?? fields.firstIndex { $0.name == name + "[]" }
+                ?? fields.firstIndex { $0.name.hasSuffix("[" + name + "]") }
+                ?? fields.firstIndex { $0.name.hasSuffix("[" + name + "][]") }
+            if let i { fields[i].value = value; log("champ « " + name + " » → « " + fields[i].name + " »") }
             else { missing.append(name) }
         }
-        if !missing.isEmpty { return .failure(.fieldsNotFound(missing)) }
+        if !missing.isEmpty {
+            log("ÉCHEC : champs introuvables — " + missing.joined(separator: ", "))
+            return .failure(.fieldsNotFound(missing))
+        }
         var body: [String: String] = [:]
         for f in fields where !f.name.isEmpty { body[f.name] = f.value }
-        guard let html = await post(base.appendingPathComponent("index.php/" + slug + "/edit"), fields: body)
+        guard let out = await postFull(base.appendingPathComponent("index.php/" + slug + "/edit"), fields: body)
         else { return .failure(.rejected("aucune r\u{e9}ponse du serveur")) }
-        if let err = firstMatch(html, "<div class=\"[^\"]*alert-danger[^\"]*\">(.*?)</div>") {
+        log("envoi de " + String(body.count) + " champs → HTTP " + String(out.status))
+        if let err = firstMatch(out.body, "<div class=\"[^\"]*alert-danger[^\"]*\">(.*?)</div>") {
+            log("ÉCHEC signalé par AtoM : " + plain(err))
             return .failure(.rejected(plain(err)))
         }
+        // Un code 200 ne prouve RIEN : sans session valide, AtoM renvoie sa page de connexion en 200.
+        // On relit donc la notice et on vérifie que les valeurs sont bien celles envoyées.
+        guard let after = await get(base.appendingPathComponent("index.php/" + slug)) else {
+            return .failure(.rejected("enregistrement non v\u{e9}rifiable (notice illisible apr\u{e8}s envoi)"))
+        }
+        let saved = parseRecord(after)
+        let control: [(String, String)] = [
+            ("extentAndMedium", saved.extentAndMedium),
+            ("archivalHistory", saved.archivalHistory),
+            ("scopeAndContent", saved.scopeAndContent),
+        ]
+        for (key, now) in control {
+            guard let expected = changes[key] else { continue }
+            let a = now.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespaces)
+            let b = expected.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespaces)
+            if a != b {
+                log("ÉCHEC : « " + key + " » vaut toujours « " + String(a.prefix(60)) + " » apr\u{e8}s envoi")
+                return .failure(.rejected("la notice n'a pas \u{e9}t\u{e9} modifi\u{e9}e (session expir\u{e9}e ou droits insuffisants)"))
+            }
+        }
+        log("enregistrement V\u{c9}RIFI\u{c9} par relecture de la notice")
         return .success(())
     }
 
@@ -415,6 +460,10 @@ enum AtomClient {
     }
 
     private static func post(_ url: URL, fields: [String: String]) async -> String? {
+        await postFull(url, fields: fields)?.body
+    }
+
+    private static func postFull(_ url: URL, fields: [String: String]) async -> (status: Int, body: String)? {
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.timeoutInterval = 45
@@ -425,8 +474,9 @@ enum AtomClient {
             (k.addingPercentEncoding(withAllowedCharacters: cs) ?? k) + "=" +
             (v.addingPercentEncoding(withAllowedCharacters: cs) ?? v)
         }.joined(separator: "&").data(using: .utf8)
-        guard let (data, _) = try? await URLSession.shared.data(for: req) else { return nil }
-        return String(data: data, encoding: .utf8)
+        guard let (data, resp) = try? await URLSession.shared.data(for: req) else { return nil }
+        let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        return (code, String(data: data, encoding: .utf8) ?? "")
     }
 
     // MARK: - HTTP

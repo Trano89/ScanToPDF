@@ -296,6 +296,7 @@ final class AppModel: ObservableObject {
         guard let base = URL(string: config.atomBaseURL), base.scheme == "https" else {
             return "Adresse invalide : seul HTTPS est accepté."
         }
+        AtomClient.log("--- ouverture de session demandée pour « \(email) » sur \(base.absoluteString)")
         let ok = await AtomClient.login(base: base, email: email, password: password)
         return await MainActor.run {
             if ok {
@@ -396,9 +397,14 @@ final class AppModel: ObservableObject {
             return .failure(AtomClient.AtomError.rejected(
                 "aucune notice cible — ScanToPDF ne crée jamais de notice"))
         }
+        AtomClient.log("publication de « \(p.code) » vers /\(slug) — champs : \(p.changes.keys.sorted().joined(separator: ", "))")
         switch await AtomClient.submitEdit(base: base, slug: slug, changes: p.changes) {
-        case .success:            return .success(())
-        case .failure(let e):     return .failure(e)
+        case .success:
+            AtomClient.log("✅ « \(p.code) » publié et vérifié")
+            return .success(())
+        case .failure(let e):
+            AtomClient.log("❌ « \(p.code) » : \(e.localizedDescription)")
+            return .failure(e)
         }
     }
 
@@ -413,7 +419,8 @@ final class AppModel: ObservableObject {
         }
         atomStatus = "Connexion à AtoM…"
         Task { [weak self] in
-            let ok = await AtomClient.login(base: base, email: email, password: password)
+            AtomClient.log("--- ouverture de session demandée pour « \(email) » sur \(base.absoluteString)")
+        let ok = await AtomClient.login(base: base, email: email, password: password)
             await MainActor.run { [weak self] in
                 self?.atomStatus = ok ? "✅ Connexion réussie." : "Connexion refusée — vérifiez les identifiants."
             }
@@ -432,6 +439,15 @@ final class AppModel: ObservableObject {
         guard let base = URL(string: config.atomBaseURL) else { return p }
         let match = await AtomClient.resolve(base: base, input: input)
         return await MainActor.run { apply(match: match, to: p) }
+    }
+
+    /// Ouvre le journal de publication AtoM dans le Finder — c'est là que se lit la cause d'un échec.
+    func openAtomLog() {
+        let url = AppPaths.appSupport.appendingPathComponent("atom.log")
+        if !FileManager.default.fileExists(atPath: url.path) {
+            try? "".write(to: url, atomically: true, encoding: .utf8)
+        }
+        NSWorkspace.shared.selectFile(url.path, inFileViewerRootedAtPath: AppPaths.appSupport.path)
     }
 
     /// Ouvre la recherche AtoM dans le navigateur, pour retrouver la notice à l'œil.
