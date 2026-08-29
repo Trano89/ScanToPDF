@@ -103,6 +103,12 @@ struct AppConfig: Codable, Equatable {
     - Ces notices alimentent un catalogue d'archives : reste factuel, neutre et concis, sans jugement de \
     valeur ni tournure promotionnelle.
     """
+    // Publication dans AtoM (https uniquement). Le mot de passe n'est PAS ici : il est dans le
+    // Trousseau (AtomCredentials). Chaque publication passe par un écran de confirmation où toutes
+    // les valeurs restent modifiables — rien n'est envoyé automatiquement sans validation.
+    var atomEnabled: Bool = false
+    var atomBaseURL: String = "https://archives.fvjc.ch"
+    var atomEmail: String = ""
     // Application :
     var startAtLogin: Bool = true    // démarrer avec le système (login item)
     var networkEnabled: Bool = true  // découverte réseau + invitation de mise à jour
@@ -157,6 +163,9 @@ struct AppConfig: Codable, Equatable {
         remoteUpdateEnabled = d(.remoteUpdateEnabled, remoteUpdateEnabled)   // sinon le réglage ne survivait pas au redémarrage
         dismissedUpdateBuild = d(.dismissedUpdateBuild, dismissedUpdateBuild)
         dismissedUpdateVersion = d(.dismissedUpdateVersion, dismissedUpdateVersion)
+        atomEnabled = d(.atomEnabled, atomEnabled)
+        atomBaseURL = d(.atomBaseURL, atomBaseURL)
+        atomEmail = d(.atomEmail, atomEmail)
         exportEnabled = d(.exportEnabled, exportEnabled)
         nasVolumePath = d(.nasVolumePath, nasVolumePath)
         nasMountFrom = d(.nasMountFrom, nasMountFrom)

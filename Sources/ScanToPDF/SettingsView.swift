@@ -32,6 +32,7 @@ struct SettingsView: View {
     @EnvironmentObject var model: AppModel
     @State private var draft: AppConfig = AppModel.shared.config
     @State private var passphrase: String = AppModel.shared.clusterPassphrase
+    @State private var atomPassword: String = ""
 
     /// Liaison vers une valeur du BROUILLON (rien n'est appliqué avant « Enregistrer »).
     private func b<T>(_ kp: WritableKeyPath<AppConfig, T>) -> Binding<T> {
@@ -311,7 +312,44 @@ struct SettingsView: View {
                          ? "🔒 Verrouillé : le mot de passe administrateur du Mac est requis pour changer de lecteur."
                          : "Seuls les lecteurs SMB montés sont proposés. Le lecteur retenu est remonté automatiquement s'il a été éjecté ; son mot de passe est demandé par macOS et gardé dans le Trousseau — jamais par l'application.")
                         .font(.caption).foregroundStyle(.secondary)
-                    Text("Le résultat est classé selon sa cote (« Eg.w.O0.… » → dossiers Eg / w / O0). Sans lecteur monté, rien n'est publié.")
+                    Text("Le résultat est classé selon sa cote (« Eg.w.O0.… » → dossiers Eg / w / O0). Sans lecteur monté, rien n'est publié. Le dossier COMPLET est copié.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+
+            Section("Catalogue AtoM") {
+                Toggle("Publier la notice dans AtoM", isOn: b(\.atomEnabled))
+                if draft.atomEnabled {
+                    TextField("Adresse (https uniquement)", text: b(\.atomBaseURL))
+                        .textFieldStyle(.roundedBorder)
+                    TextField("Courriel du compte AtoM", text: b(\.atomEmail))
+                        .textFieldStyle(.roundedBorder)
+                    HStack {
+                        SecureField("Mot de passe", text: $atomPassword)
+                            .textFieldStyle(.roundedBorder)
+                        Button("Enregistrer") {
+                            _ = AtomCredentials.save(email: draft.atomEmail, password: atomPassword)
+                            atomPassword = ""
+                        }
+                        .disabled(draft.atomEmail.isEmpty || atomPassword.isEmpty)
+                    }
+                    HStack {
+                        Button("Tester la connexion") { model.testAtomLogin() }
+                            .disabled(draft.atomEmail.isEmpty)
+                        Spacer()
+                        Text(AtomCredentials.hasPassword(for: draft.atomEmail)
+                             ? "Mot de passe enregistré dans le Trousseau"
+                             : "Aucun mot de passe enregistré")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    if !model.atomStatus.isEmpty {
+                        Text(model.atomStatus).font(.caption)
+                            .foregroundStyle(model.atomStatus.hasPrefix("✅") ? Color.green : Color.secondary)
+                            .lineLimit(2)
+                    }
+                    Text("Après chaque traitement, une fenêtre montre ce qui existe déjà dans AtoM et ce que ScanToPDF propose, champ par champ. Toutes les valeurs restent modifiables, et rien n'est envoyé sans validation.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Text("La notice est recherchée par sa cote dans SES DEUX écritures (« _ » et « / ») afin de ne jamais créer de doublon ; une notice en ancienne écriture est migrée vers « _ ». Seul le PDF/A final concerne AtoM.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }

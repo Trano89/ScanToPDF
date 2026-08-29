@@ -10,6 +10,7 @@ final class Engine {
     private var watcher: Process?
     private var stopping = false
     private var currentWatchFolder = ""
+    private var logBuffer = Data()   // lignes partielles en attente de leur fin de ligne
 
     // Resources du bundle : .../ScanToPDF.app/Contents/Resources
     private var res: URL { Bundle.main.bundleURL.appendingPathComponent("Contents/Resources", isDirectory: true) }
@@ -66,11 +67,23 @@ final class Engine {
         let pipe = Pipe()
         p.standardOutput = pipe
         p.standardError = pipe
+        // Le flux arrive en MORCEAUX arbitraires : un morceau peut contenir plusieurs lignes, ou
+        // couper une ligne en deux (voire au milieu d'un caractère accentué). On accumule donc les
+        // octets et on ne remonte que des lignes COMPLÈTES — sans quoi une ligne attendue, comme le
+        // « ✅ SUCCÈS » qui déclenche la publication, peut n'être jamais reconnue.
+        logBuffer = Data()
         pipe.fileHandleForReading.readabilityHandler = { [weak self] h in
             let d = h.availableData
-            guard !d.isEmpty, let s = String(data: d, encoding: .utf8) else { return }
-            let line = s.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !line.isEmpty { self?.onLog(line) }
+            guard !d.isEmpty, let self else { return }
+            self.logBuffer.append(d)
+            while let nl = self.logBuffer.firstIndex(of: 0x0A) {
+                let raw = self.logBuffer.prefix(upTo: nl)
+                self.logBuffer.removeSubrange(self.logBuffer.startIndex...nl)
+                if let line = String(data: raw, encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines), !line.isEmpty {
+                    self.onLog(line)
+                }
+            }
         }
         // Mort inattendue du watcher (OOM/segfault) → relance (sauf arrêt volontaire), sinon la
         // surveillance s'éteindrait en silence. main.async : sérialise avec start/stop (appelés sur le main).
@@ -103,8 +116,28 @@ final class Engine {
         p.executableURL = URL(fileURLWithPath: pythonBin)
         p.arguments = [workflowScript]
         p.environment = makeEnv(watchFolder: watchFolder)
-        p.standardOutput = FileHandle.nullDevice
-        p.standardError = FileHandle.nullDevice
+        // La sortie était jetée : le « SUCCÈS » de ce passage n'atteignait donc jamais l'application
+        // et aucune publication n'était proposée. On la lit ligne à ligne, ce qui draine le tube.
+        let pipe = Pipe()
+        p.standardOutput = pipe
+        p.standardError = pipe
+        var buffer = Data()
+        pipe.fileHandleForReading.readabilityHandler = { [weak self] h in
+            let d = h.availableData
+            guard !d.isEmpty, let self else { return }
+            buffer.append(d)
+            while let nl = buffer.firstIndex(of: 0x0A) {
+                let raw = buffer.prefix(upTo: nl)
+                buffer.removeSubrange(buffer.startIndex...nl)
+                if let line = String(data: raw, encoding: .utf8)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines), !line.isEmpty {
+                    self.onLog(line)
+                }
+            }
+        }
+        p.terminationHandler = { proc in
+            (proc.standardOutput as? Pipe)?.fileHandleForReading.readabilityHandler = nil
+        }
         try? p.run()
     }
 

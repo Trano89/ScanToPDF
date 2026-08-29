@@ -28,6 +28,19 @@ ScanToPDF automates the processing of bulk document scans. Instead of manually a
 
 ## Changelog
 
+### v1.0.22 — AtoM publication with a review step
+
+- After each result, a window shows what AtoM already holds and what ScanToPDF proposes, field by
+  field, marked **added** / **modified** / **unchanged**. **Every value stays editable**, including
+  those already in AtoM, and nothing is sent without confirmation
+- A description is looked up by its reference code in **both spellings** (`_` and `/`) so no duplicate
+  can be created; a description still using the old `/` form is migrated to `_`
+- Credentials live in the macOS Keychain, HTTPS only, with a "test connection" button
+- AtoM receives **only the final PDF/A**; the network drive keeps receiving the whole folder
+- Audit fixes: the engine's output was cut into arbitrary chunks, so a line could never be matched
+  reliably — it is now split into complete lines; and the workflow's output was discarded by both the
+  watcher and the "Traiter maintenant" button, so the completion line never reached the app at all
+
 ### v1.0.21 — Preferences in tabs, AtoM groundwork
 
 - Preferences are split into six **tabs** (Dossier, Traitement, Filigrane, Fiche ISAD, Publication,

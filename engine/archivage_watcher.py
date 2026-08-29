@@ -140,9 +140,12 @@ class Worker(threading.Thread):
                 if self._stop:
                     return
                 # start_new_session=True : le workflow devient chef de groupe → arrêt propre du sous-arbre.
+                # stdout HÉRITÉ (et non DEVNULL) : le journal du workflow — dont la ligne « SUCCÈS »
+                # qui déclenche la publication — doit remonter jusqu'à l'application. Rien à drainer
+                # ici puisque l'enfant écrit directement sur le même descripteur que le watcher.
                 self._current = subprocess.Popen(
                     [PYTHON_BIN, str(WORKFLOW_SCRIPT)],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, start_new_session=True)
+                    stdout=None, stderr=subprocess.PIPE, text=True, start_new_session=True)
             proc = self._current
             try:
                 _, err = proc.communicate(timeout=7200)

@@ -26,6 +26,11 @@ final class AppModel: ObservableObject {
     @Published var nasVolumes: [NetworkVolume] = []
     private var nasRemountTask: Task<Void, Never>?
     private var nasMountFailures = 0
+    // Publication AtoM : notice en attente de validation et statut.
+    @Published var atomPending: AtomPublication?
+    private var atomQueue: [AtomPublication] = []   // un même passage peut terminer plusieurs projets
+    @Published var atomStatus = ""
+    private var atomWindow: NSWindow?
     // Fiche ISAD : modèles Ollama installés sur ce Mac (menu des préférences) + statut de la recherche.
     @Published var ollamaModels: [String] = []
     @Published var ollamaStatus = ""
@@ -41,7 +46,10 @@ final class AppModel: ObservableObject {
         self.updateDismissedBuild = configStore.config.dismissedUpdateBuild
 
         engine.onLog = { [weak self] s in
-            Task { @MainActor in self?.status = s }
+            Task { @MainActor in
+                self?.status = s
+                self?.noticeFinishedProject(in: s)
+            }
         }
         updateService = UpdateService(nodeId: configStore.nodeId(),
                                       onUpdateAvailable: { [weak self] build, name in
@@ -265,6 +273,112 @@ final class AppModel: ObservableObject {
     func applyConfig(_ new: AppConfig) {
         update { $0 = new }
         if new.exportEnabled { connectNAS() }
+    }
+
+    // MARK: - publication dans AtoM
+
+    /// Repère « ✅ SUCCÈS : <cote> → <chemin du PDF> » dans le flux du moteur et prépare la publication.
+    private func noticeFinishedProject(in line: String) {
+        guard config.atomEnabled, line.contains("SUCCÈS"), let arrow = line.range(of: "→") else { return }
+        let pdfPath = line[arrow.upperBound...].trimmingCharacters(in: .whitespaces)
+        guard pdfPath.hasSuffix(".pdf") else { return }
+        let pdf = URL(fileURLWithPath: pdfPath)
+        prepareAtomPublication(pdf: pdf)
+    }
+
+    /// Construit la comparaison entre la notice AtoM (si elle existe, dans ses DEUX écritures de cote)
+    /// et ce que propose la fiche ISAD, puis ouvre l'écran de confirmation.
+    func prepareAtomPublication(pdf: URL) {
+        let folder = pdf.deletingLastPathComponent()
+        let code = pdf.deletingPathExtension().lastPathComponent
+        guard let base = URL(string: config.atomBaseURL) else { return }
+        atomStatus = "Recherche de la notice « \(code) » dans AtoM…"
+        Task { [weak self] in
+            let fiche = folder.appendingPathComponent(code + ".txt")
+            let text = (try? String(contentsOf: fiche, encoding: .utf8)) ?? ""
+            var proposed = AtomClient.recordFromFiche(text, code: code)
+            let match = await AtomClient.findExisting(base: base, code: code)
+            // La cote proposée est TOUJOURS l'écriture « _ » : publier migre une ancienne notice.
+            proposed.identifier = match.map { m in
+                let prefix = m.record.identifier.replacingOccurrences(of: m.matchedCode, with: "")
+                return prefix + code
+            } ?? code
+            var p = AtomPublication(code: code, folder: folder, pdf: pdf,
+                                    slug: match?.slug, matchedCode: match?.matchedCode ?? code)
+            p.fields = AtomClient.diff(existing: match?.record, proposed: proposed)
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                self.atomStatus = match == nil ? "Nouvelle notice à créer." : "Notice existante trouvée."
+                // Un passage du moteur peut terminer plusieurs projets : on les présente l'un après
+                // l'autre plutôt que d'écraser la fenêtre en cours de relecture.
+                if self.atomPending == nil { self.atomPending = p; self.openAtomWindow() }
+                else if !self.atomQueue.contains(where: { $0.code == p.code }) { self.atomQueue.append(p) }
+            }
+        }
+    }
+
+    /// Envoie les seules valeurs modifiées, après validation dans l'écran de confirmation.
+    func publishToAtom(_ p: AtomPublication) async -> Result<Void, Error> {
+        guard let base = URL(string: config.atomBaseURL) else {
+            return .failure(AtomClient.AtomError.rejected("adresse AtoM invalide"))
+        }
+        guard base.scheme == "https" else {
+            return .failure(AtomClient.AtomError.rejected("seul HTTPS est accepté pour publier"))
+        }
+        let email = config.atomEmail
+        guard let password = AtomCredentials.password(for: email) else {
+            return .failure(AtomClient.AtomError.notLoggedIn)
+        }
+        if await !AtomClient.isLoggedIn(base: base) {
+            guard await AtomClient.login(base: base, email: email, password: password) else {
+                return .failure(AtomClient.AtomError.notLoggedIn)
+            }
+        }
+        guard let slug = p.slug else {
+            return .failure(AtomClient.AtomError.rejected(
+                "création non prise en charge : créez la notice dans AtoM, puis relancez la publication"))
+        }
+        switch await AtomClient.submitEdit(base: base, slug: slug, changes: p.changes) {
+        case .success:            return .success(())
+        case .failure(let e):     return .failure(e)
+        }
+    }
+
+    /// Vérifie les identifiants sans rien publier.
+    func testAtomLogin() {
+        guard let base = URL(string: config.atomBaseURL), base.scheme == "https" else {
+            atomStatus = "Adresse invalide : seul HTTPS est accepté."; return
+        }
+        let email = config.atomEmail
+        guard let password = AtomCredentials.password(for: email) else {
+            atomStatus = "Aucun mot de passe enregistré pour « \(email) »."; return
+        }
+        atomStatus = "Connexion à AtoM…"
+        Task { [weak self] in
+            let ok = await AtomClient.login(base: base, email: email, password: password)
+            await MainActor.run { [weak self] in
+                self?.atomStatus = ok ? "✅ Connexion réussie." : "Connexion refusée — vérifiez les identifiants."
+            }
+        }
+    }
+
+    private func openAtomWindow() {
+        guard let p = atomPending else { return }
+        atomWindow?.close()
+        let host = NSHostingController(rootView: AtomPublishView(publication: p) { [weak self] in
+            guard let self else { return }
+            self.atomWindow?.close(); self.atomWindow = nil
+            self.atomPending = self.atomQueue.isEmpty ? nil : self.atomQueue.removeFirst()
+            if self.atomPending != nil { self.openAtomWindow() }
+        }.environmentObject(self))
+        let w = NSWindow(contentViewController: host)
+        w.title = "Publier dans AtoM — \(p.code)"
+        w.styleMask = [.titled, .closable, .miniaturizable]
+        w.isReleasedWhenClosed = false
+        w.center()
+        atomWindow = w
+        NSApp.activate(ignoringOtherApps: true)
+        w.makeKeyAndOrderFront(nil)
     }
 
     // MARK: - actions utilitaires
