@@ -24,6 +24,11 @@ struct AtomFieldDiff: Identifiable {
     var proposed: String        // modifiable à la volée avant validation
     var kind: Kind { existing == proposed ? .unchanged : (existing.isEmpty ? .added : .modified) }
     var id: String { key }
+    /// Les points d'accès ne sont PAS du texte : AtoM attend l'URL de terme de son thésaurus
+    /// (`routing->generate([term, 'module' => 'term'])`) et relit chaque valeur avec
+    /// `routing->parse()`. Y écrire des libellés ne publiait rien et détruisait les termes en place.
+    /// Ils restent affichés — la fiche les propose — mais ne partent pas dans le formulaire.
+    var writable: Bool { !key.hasSuffix("AccessPoints") }
 }
 
 /// Accès à l'instance AtoM. Tout passe par HTTPS ; la lecture d'une notice publique ne demande
@@ -416,7 +421,12 @@ enum AtomClient {
         let body = fields.filter { !$0.name.isEmpty }
         guard let out = await postFull(base.appendingPathComponent("index.php/" + slug + "/edit"), pairs: body)
         else { return .failure(.rejected("aucune r\u{e9}ponse du serveur")) }
-        log("envoi de " + String(body.count) + " champs → HTTP " + String(out.status))
+        // AtoM REDIRIGE vers la notice quand il a enregistré, et se contente de re-rendre le
+        // formulaire quand il refuse : l'adresse finale distingue les deux à coup sûr, là où le
+        // code HTTP vaut 200 dans les deux cas (la redirection étant suivie automatiquement).
+        let stayedOnForm = out.finalURL.hasSuffix("/edit")
+        log("envoi de " + String(body.count) + " champs → HTTP " + String(out.status)
+            + " — " + (stayedOnForm ? "resté sur le formulaire (REFUS)" : "redirigé vers " + out.finalURL))
         diagnose(out.body)
         // Un code 200 ne prouve RIEN : sans session valide, AtoM renvoie sa page de connexion en 200.
         // On relit donc la notice et on vérifie que les valeurs sont bien celles envoyées.
@@ -544,7 +554,7 @@ enum AtomClient {
     // Des PAIRES, et non un dictionnaire : un formulaire répète légitimement un même nom
     // (« subjectAccessPoints[] » porte un couple par terme). Un dictionnaire n'en gardait qu'un
     // seul — publier une notice en effaçait donc silencieusement tous les autres mots-clés.
-    private static func postFull(_ url: URL, pairs: [(name: String, value: String)]) async -> (status: Int, body: String)? {
+    private static func postFull(_ url: URL, pairs: [(name: String, value: String)]) async -> (status: Int, body: String, finalURL: String)? {
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.timeoutInterval = 45
@@ -557,7 +567,7 @@ enum AtomClient {
         }.joined(separator: "&").data(using: .utf8)
         guard let (data, resp) = try? await URLSession.shared.data(for: req) else { return nil }
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
-        return (code, String(data: data, encoding: .utf8) ?? "")
+        return (code, String(data: data, encoding: .utf8) ?? "", resp.url?.absoluteString ?? "")
     }
 
     // MARK: - HTTP

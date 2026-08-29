@@ -20,8 +20,11 @@ struct AtomPublication: Identifiable {
     var needsCodeMigration: Bool { matchedCode.contains("/") }
     var changedCount: Int { fields.filter { $0.kind != .unchanged }.count }
 
-    /// Les seules valeurs à envoyer : celles réellement modifiées.
+    /// Les seules valeurs à envoyer : celles réellement modifiées ET inscriptibles.
     var changes: [String: String] {
-        Dictionary(uniqueKeysWithValues: fields.filter { $0.kind != .unchanged }.map { ($0.key, $0.proposed) })
+        Dictionary(uniqueKeysWithValues: fields.filter { $0.kind != .unchanged && $0.writable }
+                                               .map { ($0.key, $0.proposed) })
     }
+    /// Mots-clés proposés par la fiche qu'AtoM n'accepte pas sous forme de texte.
+    var unwritable: [AtomFieldDiff] { fields.filter { $0.kind != .unchanged && !$0.writable } }
 }
