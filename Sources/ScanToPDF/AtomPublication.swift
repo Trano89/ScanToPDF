@@ -7,11 +7,15 @@ struct AtomPublication: Identifiable {
     let code: String                 // cote locale, écriture « _ »
     let folder: URL                  // dossier projet (copié en entier sur le lecteur réseau)
     let pdf: URL                     // SEUL fichier publié dans AtoM : le PDF/A final
-    var slug: String?                // notice existante, nil = création
+    var proposed: AtomRecord = AtomRecord()   // ce que propose la fiche, conservé pour recomparer
+    var slug: String?                // notice existante ; nil = INTROUVABLE (aucune création possible)
     var matchedCode: String = ""     // écriture trouvée dans AtoM (« _ » ou « / »)
     var fields: [AtomFieldDiff] = []
 
     var exists: Bool { slug != nil }
+    /// Aucune notice trouvée : on ne crée jamais de notice depuis ScanToPDF — le catalogue reste
+    /// maître de son arborescence. L'utilisateur réessaie, cherche à la main, ou renonce.
+    var notFound: Bool { slug == nil }
     /// La notice utilise l'ancienne écriture « / » : sa cote sera migrée vers « _ ».
     var needsCodeMigration: Bool { matchedCode.contains("/") }
     var changedCount: Int { fields.filter { $0.kind != .unchanged }.count }

@@ -304,6 +304,7 @@ final class AppModel: ObservableObject {
                 return prefix + code
             } ?? code
             var p = AtomPublication(code: code, folder: folder, pdf: pdf,
+                                    proposed: proposed,
                                     slug: match?.slug, matchedCode: match?.matchedCode ?? code)
             p.fields = AtomClient.diff(existing: match?.record, proposed: proposed)
             await MainActor.run { [weak self] in
@@ -336,7 +337,7 @@ final class AppModel: ObservableObject {
         }
         guard let slug = p.slug else {
             return .failure(AtomClient.AtomError.rejected(
-                "création non prise en charge : créez la notice dans AtoM, puis relancez la publication"))
+                "aucune notice cible — ScanToPDF ne crée jamais de notice"))
         }
         switch await AtomClient.submitEdit(base: base, slug: slug, changes: p.changes) {
         case .success:            return .success(())
@@ -360,6 +361,43 @@ final class AppModel: ObservableObject {
                 self?.atomStatus = ok ? "✅ Connexion réussie." : "Connexion refusée — vérifiez les identifiants."
             }
         }
+    }
+
+    /// Relance la recherche automatique (les deux écritures de cote) sur la publication en cours.
+    func retryAtomLookup(_ p: AtomPublication) async -> AtomPublication {
+        guard let base = URL(string: config.atomBaseURL) else { return p }
+        let match = await AtomClient.findExisting(base: base, code: p.code)
+        return await MainActor.run { apply(match: match, to: p) }
+    }
+
+    /// Rattache la publication à une notice désignée à la main (adresse, identifiant ou cote).
+    func resolveAtomManually(_ p: AtomPublication, input: String) async -> AtomPublication {
+        guard let base = URL(string: config.atomBaseURL) else { return p }
+        let match = await AtomClient.resolve(base: base, input: input)
+        return await MainActor.run { apply(match: match, to: p) }
+    }
+
+    /// Ouvre la recherche AtoM dans le navigateur, pour retrouver la notice à l'œil.
+    func openAtomSearch(for code: String) {
+        guard let base = URL(string: config.atomBaseURL),
+              let url = AtomClient.searchURL(base: base, code: code) else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    /// Recompose la comparaison à partir d'une notice retrouvée — la proposition, elle, ne bouge pas.
+    private func apply(match: AtomClient.Match?, to p: AtomPublication) -> AtomPublication {
+        var out = p
+        out.slug = match?.slug
+        out.matchedCode = match?.matchedCode ?? p.code
+        var proposed = p.proposed
+        if let m = match {
+            // La cote proposée reste l'écriture « _ » : publier migre une notice en ancienne forme.
+            let prefix = m.record.identifier.replacingOccurrences(of: m.matchedCode, with: "")
+            proposed.identifier = prefix + p.code
+        }
+        out.fields = AtomClient.diff(existing: match?.record, proposed: proposed)
+        atomStatus = match == nil ? "Toujours introuvable dans AtoM." : "Notice rattachée : /\(match!.slug)"
+        return out
     }
 
     private func openAtomWindow() {

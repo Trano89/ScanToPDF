@@ -212,6 +212,30 @@ enum AtomClient {
     }
 
 
+
+    /// Résout une saisie manuelle : adresse complète de la notice, identifiant d'adresse, ou cote.
+    /// Sert quand la recherche automatique n'a rien trouvé et que l'archiviste sait, lui, où elle est.
+    static func resolve(base: URL, input: String) async -> Match? {
+        let t = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty else { return nil }
+        var candidate = t
+        if let u = URL(string: t), u.scheme != nil, let last = u.pathComponents.last, !last.isEmpty {
+            candidate = last
+        }
+        if let html = await get(base.appendingPathComponent("index.php/" + candidate)),
+           html.contains("class=\"field") {
+            let r = parseRecord(html)
+            return Match(slug: candidate, record: r, matchedCode: bareCode(r.identifier, fallback: candidate))
+        }
+        return await findExisting(base: base, code: candidate)
+    }
+
+    /// Adresse de la recherche AtoM pour une cote, à ouvrir dans le navigateur.
+    static func searchURL(base: URL, code: String) -> URL? {
+        let q = "\"\(code)\"".addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? code
+        return URL(string: base.absoluteString + "/index.php/informationobject/browse?sq0=" + q + "&topLod=0")
+    }
+
     // MARK: - proposition issue de la fiche ISAD
 
     /// Construit la proposition à partir de la fiche « <cote>.txt » écrite par le moteur : sections

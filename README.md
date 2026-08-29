@@ -28,6 +28,15 @@ ScanToPDF automates the processing of bulk document scans. Instead of manually a
 
 ## Changelog
 
+### v1.0.23 — No record is ever created
+
+- ScanToPDF never creates a description: the catalogue stays in charge of its own hierarchy
+- When a description cannot be found, the window offers exactly three ways out — **retry** the
+  automatic lookup, **search manually** (paste the record URL, its slug, or another reference code —
+  a button opens the AtoM search in the browser), or **cancel**
+- The proposed values stay visible for reference while nothing is attached, and publishing is
+  impossible until a record is
+
 ### v1.0.22 — AtoM publication with a review step
 
 - After each result, a window shows what AtoM already holds and what ScanToPDF proposes, field by

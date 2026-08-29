@@ -8,6 +8,7 @@ struct AtomPublishView: View {
     @State private var pub: AtomPublication
     @State private var busy = false
     @State private var message = ""
+    @State private var manualInput = ""
     let onClose: () -> Void
 
     init(publication: AtomPublication, onClose: @escaping () -> Void) {
@@ -19,12 +20,19 @@ struct AtomPublishView: View {
         VStack(alignment: .leading, spacing: 0) {
             header
             Divider()
+            if pub.notFound { notFoundPanel }
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
+                    if pub.notFound {
+                        Text("Ce que ScanToPDF aurait publié — pour mémoire, tant qu'aucune notice n'est rattachée :")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                     ForEach($pub.fields) { $f in fieldRow($f) }
                 }
                 .padding(16)
             }
+            .disabled(pub.notFound)
+            .opacity(pub.notFound ? 0.55 : 1)
             Divider()
             footer
         }
@@ -34,9 +42,9 @@ struct AtomPublishView: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
-                Image(systemName: pub.exists ? "doc.text.magnifyingglass" : "plus.rectangle.on.folder")
-                    .foregroundStyle(pub.exists ? Color.accentColor : Color.green)
-                Text(pub.exists ? "Mise à jour d'une notice existante" : "Création d'une nouvelle notice")
+                Image(systemName: pub.exists ? "doc.text.magnifyingglass" : "questionmark.folder")
+                    .foregroundStyle(pub.exists ? Color.accentColor : Color.orange)
+                Text(pub.exists ? "Mise à jour d'une notice existante" : "Notice introuvable dans AtoM")
                     .font(.headline)
                 Spacer()
                 Text(pub.code).font(.system(.body, design: .monospaced)).foregroundStyle(.secondary)
@@ -45,7 +53,7 @@ struct AtomPublishView: View {
                 Text("Notice trouvée dans AtoM : /\(slug)")
                     .font(.caption).foregroundStyle(.secondary)
             } else {
-                Text("Aucune notice ne porte cette cote, dans aucune de ses deux écritures (« _ » et « / »).")
+                Text("Aucune notice ne porte cette cote, dans aucune de ses deux écritures (« _ » et « / »). ScanToPDF ne crée jamais de notice : le catalogue reste maître de son arborescence.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             if pub.needsCodeMigration {
@@ -92,19 +100,74 @@ struct AtomPublishView: View {
         }
     }
 
+
+    /// Notice introuvable : trois issues, et aucune création. Soit la recherche recommence, soit
+    /// l'archiviste désigne lui-même la notice, soit il renonce.
+    private var notFoundPanel: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Que faire ?").font(.subheadline).bold()
+            HStack(spacing: 10) {
+                Button {
+                    busy = true; message = "Nouvelle recherche…"
+                    Task {
+                        let updated = await model.retryAtomLookup(pub)
+                        await MainActor.run {
+                            pub = updated; busy = false
+                            message = updated.exists ? "Notice rattachée." : "Toujours introuvable."
+                        }
+                    }
+                } label: { Label("Réessayer", systemImage: "arrow.clockwise") }
+                    .disabled(busy)
+                Button {
+                    model.openAtomSearch(for: pub.code)
+                } label: { Label("Chercher dans AtoM", systemImage: "safari") }
+                Spacer()
+            }
+            Text("Recherche manuelle — collez l'adresse de la notice, son identifiant d'adresse, ou saisissez une autre cote :")
+                .font(.caption).foregroundStyle(.secondary)
+            HStack {
+                TextField("https://archives.fvjc.ch/index.php/…  ou  Be-a-S1-1989-1  ou  Be.a.S1.1989/1",
+                          text: $manualInput)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { resolveManually() }
+                Button("Rattacher") { resolveManually() }
+                    .disabled(busy || manualInput.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .padding(14)
+        .background(Color.orange.opacity(0.08))
+    }
+
+    private func resolveManually() {
+        let input = manualInput
+        busy = true; message = "Recherche de « \(input) »…"
+        Task {
+            let updated = await model.resolveAtomManually(pub, input: input)
+            await MainActor.run {
+                pub = updated; busy = false
+                message = updated.exists ? "Notice rattachée : /\(updated.slug ?? "")"
+                                         : "Rien ne correspond à « \(input) »."
+                if updated.exists { manualInput = "" }
+            }
+        }
+    }
+
     private var footer: some View {
         HStack {
             if busy { ProgressView().controlSize(.small) }
-            Text(message.isEmpty ? "\(pub.changedCount) champ(s) à envoyer" : message)
+            Text(message.isEmpty
+                 ? (pub.notFound ? "Aucune notice rattachée — rien ne peut être envoyé."
+                                 : "\(pub.changedCount) champ(s) à envoyer")
+                 : message)
                 .font(.caption)
                 .foregroundStyle(message.hasPrefix("✅") ? Color.green
                                  : (message.isEmpty ? Color.secondary : Color.orange))
                 .lineLimit(2)
             Spacer()
             Button("Annuler") { onClose() }
-            Button(pub.exists ? "Mettre à jour dans AtoM" : "Créer dans AtoM") { publish() }
+            Button("Mettre à jour dans AtoM") { publish() }
                 .buttonStyle(.borderedProminent)
-                .disabled(busy || pub.changedCount == 0)
+                .disabled(busy || pub.notFound || pub.changedCount == 0)
         }
         .padding(14)
     }
