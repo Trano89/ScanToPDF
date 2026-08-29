@@ -494,8 +494,13 @@ enum AtomClient {
             guard let html = await get(url) else { continue }
             let text = plain(html)
             if text.contains("Skipping record") || text.contains("Unable to match") {
+                // On recopie le verdict d'AtoM mot pour mot : c'est lui qui nomme la valeur en cause.
+                for l in text.components(separatedBy: "\n") where l.contains("Unable to match")
+                                                              || l.contains("Skipping record") {
+                    log("  AtoM : " + l.trimmingCharacters(in: .whitespaces))
+                }
                 log("travail \(job) : notice NON appariée — AtoM a ignoré la ligne")
-                return .failure(.rejected("aucune notice appariée dans AtoM (cote, titre ou dépôt différents)"))
+                return .failure(.rejected("aucune notice appariée dans AtoM (cote propre, titre ou dépôt différents)"))
             }
             if text.contains("Completed") || text.contains("Terminé") {
                 log("travail \(job) : terminé après \(attempt * 2) s")
@@ -515,22 +520,30 @@ enum AtomClient {
     /// Publie une notice par import CSV, puis VÉRIFIE par relecture que la notice a bien changé.
     static func publishViaCsv(base: URL, slug: String, record: AtomRecord,
                               changes: [String: String]) async -> Result<Void, AtomError> {
-        var values: [String: String] = [
-            "identifier": bareCode(record.identifier, fallback: ""),
-            "title": record.title,
-            "repository": record.repository,
-            "culture": "fr",
-        ]
-        for (k, v) in changes { values[k] = v }
-        guard !values["identifier"]!.isEmpty, !values["title"]!.isEmpty else {
+        // La « Cote » affichée par AtoM est la cote de RÉFÉRENCE : pays, dépôt et cotes des parents
+        // assemblés (« CH FVJC Zz.z.Z1.2026_1 »). L'appariement de l'import porte sur la cote PROPRE
+        // de la notice (« 2026_1 »), stockée dans information_object.identifier. Seul le formulaire
+        // d'édition donne cette valeur telle quelle : on la lit là plutôt que de la déduire.
+        guard let form = await editFormFields(base: base, slug: slug) else {
+            return .failure(.formUnavailable)
+        }
+        let ownIdentifier = form.first { $0.name == "identifier" }?.value ?? ""
+        let ownTitle = form.first { $0.name == "title" }?.value ?? record.title
+        guard !ownIdentifier.isEmpty, !ownTitle.isEmpty else {
             return .failure(.rejected("cote ou titre absent de la notice — appariement impossible"))
         }
-        log("import CSV de « \(values["identifier"]!) » — titre « \(values["title"]!) », dépôt « \(record.repository)"
-            + "\(record.repository.isEmpty ? " (absent : appariement sur cote + titre seuls)" : "")»")
+        var values: [String: String] = ["culture": "fr"]
+        for (k, v) in changes where k != "identifier" { values[k] = v }
+        values["identifier"] = ownIdentifier
+        values["title"] = ownTitle
+        values["repository"] = record.repository
+        log("import CSV : cote propre « \(ownIdentifier) » (référence « \(record.identifier) »), "
+            + "titre « \(ownTitle) », dépôt « \(record.repository)»"
+            + (record.repository.isEmpty ? " — dépôt absent, appariement sur cote + titre" : ""))
         let csv = buildCSV(values)
         try? csv.data(using: .utf8)?
             .write(to: URL(fileURLWithPath: "/Users/Shared/ScanToPDF/atom_import.csv"))
-        switch await startImport(base: base, csv: csv, code: values["identifier"]!) {
+        switch await startImport(base: base, csv: csv, code: slug) {
         case .failure(let e): return .failure(e)
         case .success(let job):
             if case .failure(let e) = await awaitImport(base: base, job: job) { return .failure(e) }
