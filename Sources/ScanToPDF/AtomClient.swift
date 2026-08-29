@@ -95,8 +95,12 @@ enum AtomClient {
                 guard let html = await get(base.appendingPathComponent("index.php/\(cand)")),
                       html.contains("class=\"field") else { continue }
                 let rec = parseRecord(html)
-                let bare = bareCode(rec.identifier, fallback: variant)
-                // On n'accepte le résultat que si la cote correspond vraiment à l'une des écritures.
+                // La cote doit venir de la notice ELLE-MÊME. En repliant sur le code cherché quand
+                // l'identifiant est illisible, la vérification se prouvait toute seule : n'importe
+                // quelle page renvoyée par la recherche était acceptée comme « la » notice — une
+                // notice sans rapport a ainsi été proposée à l'écriture.
+                let bare = bareCode(rec.identifier, fallback: "")
+                guard !bare.isEmpty else { continue }
                 if codeVariants(code).contains(where: { $0.caseInsensitiveCompare(bare) == .orderedSame }) {
                     return Match(slug: cand, record: rec, matchedCode: bare)
                 }
@@ -328,15 +332,52 @@ enum AtomClient {
             log("formulaire d'\u{e9}dition inaccessible pour /" + slug + " (non connect\u{e9} ou droits insuffisants)")
             return nil
         }
-        guard let form = isolateForm(html, actionContains: slug + "/edit") ?? isolateForm(html, actionContains: "/edit") else {
-            log("aucun formulaire d'\u{e9}dition dans la page /" + slug + "/edit")
+        // Le repli « n'importe quel formulaire dont l'action contient /edit » a déjà isolé le
+        // formulaire du COMPTE UTILISATEUR (mot de passe, groupes) sur une page qui n'était pas une
+        // notice. On exige donc la signature d'une description archivistique avant d'écrire quoi que
+        // ce soit : mieux vaut échouer que remplir le mauvais formulaire.
+        let candidates = [isolateForm(html, actionContains: slug + "/edit"),
+                          isolateForm(html, actionContains: "/edit")].compactMap { $0 }
+        guard let form = candidates.first(where: { $0.contains("name=\"scopeAndContent\"") }) else {
+            log(candidates.isEmpty
+                ? "aucun formulaire d'\u{e9}dition dans la page /" + slug + "/edit"
+                : "le formulaire de /" + slug + "/edit n'est PAS celui d'une notice — \u{e9}criture refus\u{e9}e")
             return nil
         }
+        try? form.data(using: .utf8)?
+            .write(to: URL(fileURLWithPath: "/Users/Shared/ScanToPDF/atom_formulaire.html"))
         return formFields(form)
     }
 
     /// Envoie les modifications. Tous les autres champs sont renvoyés inchangés : un formulaire
     /// Symfony partiellement soumis EFFACE ce qu'il ne reçoit pas.
+
+    // Un HTTP 200 ne dit pas si AtoM a ENREGISTRÉ : il re-rend simplement la page. On identifie donc
+    // l'état réel de la réponse et on la conserve sur disque — les refus de validation d'AtoM ne sont
+    // pas dans une alerte globale mais collés à chaque champ, invisibles pour un test naïf.
+    private static func diagnose(_ body: String) {
+        try? body.data(using: .utf8)?
+            .write(to: URL(fileURLWithPath: "/Users/Shared/ScanToPDF/atom_reponse.html"))
+        let isForm  = body.contains("name=\"scopeAndContent\"")
+        let isLogin = !isForm && body.contains("name=\"password\"")
+        log("réponse : " + (isLogin ? "page de CONNEXION (session perdue)"
+                          : isForm ? "formulaire d'édition RE-RENDU (enregistrement refusé)"
+                                   : "page de consultation")
+            + " — " + String(body.count) + " octets, copiée dans atom_reponse.html")
+        for pattern in ["<ul class=\"error_list\">(.*?)</ul>",
+                        "<div class=\"[^\"]*invalid-feedback[^\"]*\">(.*?)</div>",
+                        "<div class=\"[^\"]*alert-danger[^\"]*\">(.*?)</div>",
+                        "<div class=\"[^\"]*messages error[^\"]*\">(.*?)</div>"] {
+            guard let re = try? NSRegularExpression(pattern: pattern,
+                                                    options: [.caseInsensitive, .dotMatchesLineSeparators]) else { continue }
+            for m in re.matches(in: body, range: NSRange(body.startIndex..., in: body)).prefix(8) {
+                guard let r = Range(m.range(at: 1), in: body) else { continue }
+                let msg = plain(String(body[r]))
+                if !msg.isEmpty { log("  refus AtoM : " + msg) }
+            }
+        }
+    }
+
     static func submitEdit(base: URL, slug: String, changes: [String: String]) async -> Result<Void, AtomError> {
         guard var fields = await editFormFields(base: base, slug: slug) else { return .failure(.formUnavailable) }
         log("champs du formulaire (" + String(fields.count) + ") : "
@@ -349,22 +390,34 @@ enum AtomClient {
                 ?? fields.firstIndex { $0.name == name + "[]" }
                 ?? fields.firstIndex { $0.name.hasSuffix("[" + name + "]") }
                 ?? fields.firstIndex { $0.name.hasSuffix("[" + name + "][]") }
-            if let i { fields[i].value = value; log("champ « " + name + " » → « " + fields[i].name + " »") }
+            if let i {
+                let target = fields[i].name
+                fields[i].value = value
+                // Champ multi-valeurs : on remplace la liste entière, sans laisser traîner les
+                // anciennes occurrences à côté de la nouvelle valeur.
+                var kept: [(name: String, value: String)] = []
+                var seen = false
+                for f in fields {
+                    if f.name == target {
+                        if seen { continue }
+                        seen = true
+                    }
+                    kept.append(f)
+                }
+                fields = kept
+                log("champ « " + name + " » → « " + target + " »")
+            }
             else { missing.append(name) }
         }
         if !missing.isEmpty {
             log("ÉCHEC : champs introuvables — " + missing.joined(separator: ", "))
             return .failure(.fieldsNotFound(missing))
         }
-        var body: [String: String] = [:]
-        for f in fields where !f.name.isEmpty { body[f.name] = f.value }
-        guard let out = await postFull(base.appendingPathComponent("index.php/" + slug + "/edit"), fields: body)
+        let body = fields.filter { !$0.name.isEmpty }
+        guard let out = await postFull(base.appendingPathComponent("index.php/" + slug + "/edit"), pairs: body)
         else { return .failure(.rejected("aucune r\u{e9}ponse du serveur")) }
         log("envoi de " + String(body.count) + " champs → HTTP " + String(out.status))
-        if let err = firstMatch(out.body, "<div class=\"[^\"]*alert-danger[^\"]*\">(.*?)</div>") {
-            log("ÉCHEC signalé par AtoM : " + plain(err))
-            return .failure(.rejected(plain(err)))
-        }
+        diagnose(out.body)
         // Un code 200 ne prouve RIEN : sans session valide, AtoM renvoie sa page de connexion en 200.
         // On relit donc la notice et on vérifie que les valeurs sont bien celles envoyées.
         guard let after = await get(base.appendingPathComponent("index.php/" + slug)) else {
@@ -410,6 +463,27 @@ enum AtomClient {
     }
 
     /// Tous les champs postables : input, textarea, et l'option sélectionnée des select.
+    // Un navigateur n'envoie jamais un champ désactivé. AtoM garde dans son formulaire des lignes
+    // de gabarit désactivées (événements, notes, niveaux enfants) que sa page clone en JavaScript :
+    // les poster revient à soumettre des enregistrements vides, ce qu'AtoM refuse en bloc.
+    private static func isDisabled(_ tag: String) -> Bool {
+        tag.range(of: "(^|\\s)disabled(\\s|=|>|$)", options: [.regularExpression, .caseInsensitive]) != nil
+    }
+
+    private static func selectedOptions(_ body: String) -> [String] {
+        guard let re = try? NSRegularExpression(pattern: "<option\\b([^>]*)>",
+                                                options: [.caseInsensitive]) else { return [] }
+        var out: [String] = []
+        for m in re.matches(in: body, range: NSRange(body.startIndex..., in: body)) {
+            guard let r = Range(m.range(at: 1), in: body) else { continue }
+            let a = String(body[r])
+            guard a.range(of: "(^|\\s)selected(\\s|=|>|$)", options: [.regularExpression, .caseInsensitive]) != nil,
+                  let v = attr("<option" + a + ">", "value") else { continue }
+            out.append(v)
+        }
+        return out
+    }
+
     static func formFields(_ html: String) -> [(name: String, value: String)] {
         var out: [(String, String)] = []
         if let re = try? NSRegularExpression(pattern: "<input\\b[^>]*>", options: [.caseInsensitive]) {
@@ -417,7 +491,8 @@ enum AtomClient {
                 guard let r = Range(m.range, in: html) else { continue }
                 let tag = String(html[r])
                 let type = (attr(tag, "type") ?? "text").lowercased()
-                guard type != "submit", type != "button", type != "file", let name = attr(tag, "name") else { continue }
+                guard type != "submit", type != "button", type != "file", !isDisabled(tag),
+                      let name = attr(tag, "name") else { continue }
                 if (type == "checkbox" || type == "radio"), !tag.lowercased().contains("checked") { continue }
                 out.append((name, attr(tag, "value") ?? ""))
             }
@@ -426,6 +501,7 @@ enum AtomClient {
                                              options: [.caseInsensitive, .dotMatchesLineSeparators]) {
             for m in re.matches(in: html, range: NSRange(html.startIndex..., in: html)) {
                 guard let a = Range(m.range(at: 1), in: html), let v = Range(m.range(at: 2), in: html),
+                      !isDisabled(String(html[a])),
                       let name = attr("<textarea" + String(html[a]) + ">", "name") else { continue }
                 out.append((name, plain(String(html[v]))))
             }
@@ -434,11 +510,13 @@ enum AtomClient {
                                              options: [.caseInsensitive, .dotMatchesLineSeparators]) {
             for m in re.matches(in: html, range: NSRange(html.startIndex..., in: html)) {
                 guard let a = Range(m.range(at: 1), in: html), let inner = Range(m.range(at: 2), in: html),
+                      !isDisabled(String(html[a])),
                       let name = attr("<select" + String(html[a]) + ">", "name") else { continue }
-                let body = String(html[inner])
-                let sel = firstMatch(body, "<option[^>]*selected[^>]*value=\"([^\"]*)\"")
-                    ?? firstMatch(body, "<option[^>]*value=\"([^\"]*)\"[^>]*selected")
-                out.append((name, sel ?? ""))
+                // Une liste à choix multiples porte AUTANT de valeurs que d'options sélectionnées
+                // (les mots-clés d'une notice, par exemple). N'en retenir qu'une effaçait les autres.
+                let sel = selectedOptions(String(html[inner]))
+                if sel.isEmpty { out.append((name, "")) }
+                else { for v in sel { out.append((name, v)) } }
             }
         }
         return out
@@ -460,19 +538,22 @@ enum AtomClient {
     }
 
     private static func post(_ url: URL, fields: [String: String]) async -> String? {
-        await postFull(url, fields: fields)?.body
+        await postFull(url, pairs: fields.map { (name: $0.key, value: $0.value) })?.body
     }
 
-    private static func postFull(_ url: URL, fields: [String: String]) async -> (status: Int, body: String)? {
+    // Des PAIRES, et non un dictionnaire : un formulaire répète légitimement un même nom
+    // (« subjectAccessPoints[] » porte un couple par terme). Un dictionnaire n'en gardait qu'un
+    // seul — publier une notice en effaçait donc silencieusement tous les autres mots-clés.
+    private static func postFull(_ url: URL, pairs: [(name: String, value: String)]) async -> (status: Int, body: String)? {
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.timeoutInterval = 45
         req.setValue("application/x-www-form-urlencoded; charset=utf-8", forHTTPHeaderField: "Content-Type")
         var cs = CharacterSet.alphanumerics
         cs.insert(charactersIn: "-._~")
-        req.httpBody = fields.map { k, v in
-            (k.addingPercentEncoding(withAllowedCharacters: cs) ?? k) + "=" +
-            (v.addingPercentEncoding(withAllowedCharacters: cs) ?? v)
+        req.httpBody = pairs.map { f in
+            (f.name.addingPercentEncoding(withAllowedCharacters: cs) ?? f.name) + "=" +
+            (f.value.addingPercentEncoding(withAllowedCharacters: cs) ?? f.value)
         }.joined(separator: "&").data(using: .utf8)
         guard let (data, resp) = try? await URLSession.shared.data(for: req) else { return nil }
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
