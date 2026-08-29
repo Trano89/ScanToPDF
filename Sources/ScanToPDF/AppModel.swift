@@ -92,16 +92,6 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Retient un lecteur comme destination. Refusé tant que le verrou administrateur est en place.
-    func selectNASVolume(_ volume: NetworkVolume) {
-        guard !config.nasLocked else {
-            nasStatus = "Réglages verrouillés — déverrouillez pour changer de lecteur."
-            return
-        }
-        update { $0.nasVolumePath = volume.path; $0.nasMountFrom = volume.mountFrom }
-        nasMountFailures = 0
-        nasStatus = "Lecteur retenu : \(volume.name)"
-    }
 
     /// Pose ou retire le verrou. Le RETRAIT exige le mot de passe administrateur du Mac (comme le
     /// cadenas des Réglages Système) ; le poser n'a évidemment pas à être protégé.
@@ -270,6 +260,13 @@ final class AppModel: ObservableObject {
         if folderChanged { engine.restart(watchFolder: c.watchFolder) }
     }
 
+    /// Applique en une fois un brouillon de configuration (bouton « Enregistrer » des préférences).
+    /// Passe par update() pour conserver les effets de bord : dossier surveillé, réseau, login item.
+    func applyConfig(_ new: AppConfig) {
+        update { $0 = new }
+        if new.exportEnabled { connectNAS() }
+    }
+
     // MARK: - actions utilitaires
     func processNow() {
         status = "Traitement en cours…"
@@ -293,7 +290,7 @@ final class AppModel: ObservableObject {
             w.title = "ScanToPDF — Préférences"
             w.styleMask = [.titled, .closable, .miniaturizable]
             w.isReleasedWhenClosed = false
-            w.setContentSize(NSSize(width: 460, height: 600))
+            w.setContentSize(NSSize(width: 580, height: 640))
             w.center()
             prefsWindow = w
         }

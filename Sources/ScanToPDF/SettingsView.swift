@@ -14,346 +14,349 @@ enum PageSeparator: String, Identifiable, CaseIterable {
     var id: String { rawValue }
     var displayName: String {
         switch self {
-        case .dash:   return "Tiret (-)"
+        case .dash:       return "Tiret (-)"
         case .underscore: return "Souligné (_)"
-        case .dot:  return "Point (.)"
-        case .tilde:    return "Tilde (~)"
-        case .colon:    return "Deux-points (:)"
-        case .space:    return "Espace (\u{2009})"
+        case .dot:        return "Point (.)"
+        case .tilde:      return "Tilde (~)"
+        case .colon:      return "Deux-points (:)"
+        case .space:      return "Espace (\u{2009})"
         }
     }
 }
 
-// Fenêtre de préférences : dossier surveillé + cases à cocher des étapes du pipeline + réglages app.
+/// Fenêtre de préférences, organisée en ONGLETS : une seule page devenait illisible.
+/// Les réglages sont édités dans un BROUILLON et ne prennent effet qu'au bouton « Enregistrer »,
+/// pour qu'une modification en cours de saisie ne parte jamais au moteur à moitié faite.
+/// Les actions immédiates (monter un lecteur, verrouiller, choisir un fichier) restent instantanées.
 struct SettingsView: View {
     @EnvironmentObject var model: AppModel
-    @State private var folder: String = AppModel.shared.config.watchFolder
+    @State private var draft: AppConfig = AppModel.shared.config
     @State private var passphrase: String = AppModel.shared.clusterPassphrase
-    @State private var pageDelimChar: PageSeparator = {
-        guard let found = PageSeparator.allCases.first(where: { $0.rawValue == AppModel.shared.config.pageDelimiter }) else { return .dash }
-        return found
-    }()
-    // Champs NAS (édition locale, appliqués via « Enregistrer »).
-    @State private var nasSubpath: String = AppModel.shared.config.nasSubpath
 
-    // Binding pratique vers un booléen de la config (sauvegarde + application immédiate via model.update).
-    private func toggle(_ kp: WritableKeyPath<AppConfig, Bool>) -> Binding<Bool> {
-        Binding(get: { model.config[keyPath: kp] }, set: { v in model.update { $0[keyPath: kp] = v } })
+    /// Liaison vers une valeur du BROUILLON (rien n'est appliqué avant « Enregistrer »).
+    private func b<T>(_ kp: WritableKeyPath<AppConfig, T>) -> Binding<T> {
+        Binding(get: { draft[keyPath: kp] }, set: { draft[keyPath: kp] = $0 })
     }
+    private var dirty: Bool { draft != model.config }
 
     var body: some View {
         VStack(spacing: 0) {
             if model.legacyDetected { legacyBanner }
             if model.updateAvailable || model.updateInstalling { updateBanner }
 
-            Form {
-                Section("Dossier surveillé") {
-                    TextField("Chemin", text: $folder)
-                        .textFieldStyle(.roundedBorder)
-                        .onSubmit { model.update { $0.watchFolder = folder } }
-                    HStack {
-                        Button("Choisir…") { chooseFolder() }
-                        Button("Ouvrir le dossier") { model.openWatchFolder() }
-                        Spacer()
-                        Button("Traiter maintenant") { model.processNow() }
-                    }
-                    Text("Les TIFF et les PDF déposés ici sont traités de façon identique et convertis en PDF/A.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-
-                Section("Étapes du traitement") {
-                    Toggle("OCR — couche texte (français + anglais)", isOn: toggle(\.ocr))
-                    if model.config.ocr {
-                        Picker("Mise en page (colonnes)", selection: Binding(
-                            get: { model.config.tesseractPSM },
-                            set: { v in model.update { $0.tesseractPSM = v } })) {
-                            Text("Automatique (détecte les colonnes)").tag(3)
-                            Text("Colonne unique").tag(4)
-                            Text("Bloc de texte").tag(6)
-                        }.padding(.leading, 18)
-                        Picker("Binarisation (qualité scan)", selection: Binding(
-                            get: { model.config.ocrThreshold },
-                            set: { v in model.update { $0.ocrThreshold = v } })) {
-                            Text("Adaptative (recommandé)").tag("adaptive-otsu")
-                            Text("Sauvola (documents anciens)").tag("sauvola")
-                            Text("Standard").tag("auto")
-                        }.padding(.leading, 18)
-                    }
-                    Toggle("Rotation automatique de l'orientation", isOn: toggle(\.rotate))
-                    if model.config.rotate {
-                        Stepper(value: Binding(get: { model.config.rotateThreshold },
-                                               set: { v in model.update { $0.rotateThreshold = v } }),
-                                in: 2...60, step: 1) {
-                            Text("Seuil de confiance : \(model.config.rotateThreshold) — plus élevé = moins d'erreurs")
-                        }
-                        .padding(.leading, 18)
-                    }
-                    Toggle("Redressement des pages inclinées (deskew)", isOn: toggle(\.deskew))
-                    Toggle("Nettoyage de l'image (unpaper)", isOn: toggle(\.clean))
-                    Toggle("Compression", isOn: toggle(\.compress))
-                    if model.config.compress {
-                        Stepper(value: Binding(get: { model.config.dpi },
-                                               set: { v in model.update { $0.dpi = v } }),
-                                in: 72...600, step: 25) {
-                            Text("Résolution cible : \(model.config.dpi) DPI")
-                        }
-                        .padding(.leading, 18)
-                    }
-                    Toggle("Sortie PDF/A-2b (archivage normalisé)", isOn: toggle(\.pdfa))
-                    Toggle("Supprimer les originaux après traitement", isOn: toggle(\.deleteOriginals))
-                    Text(model.config.deleteOriginals
-                         ? "⚠️ Les originaux (TIFF et PDF) seront supprimés après génération du PDF."
-                         : "Les originaux (TIFF et PDF) sont conservés dans le sous-dossier du projet.")
-                        .font(.caption).foregroundStyle(model.config.deleteOriginals ? .orange : .secondary)
-                    Toggle("Notification macOS en fin de traitement", isOn: toggle(\.notify))
-                }
-
-                Section("Regroupement des fichiers") {
-                    Text("Un seul caractère détermine le découpage : celui qui précède le NUMÉRO DE PAGE. Tout ce qui se trouve avant lui est la cote, conservée telle quelle pour le dossier et le PDF produit — TIFF et PDF suivent exactement la même règle.")
-                        .font(.caption).foregroundStyle(.secondary)
-                    VStack(alignment: .leading, spacing: 6) {
-                        Picker("Séparateur de pagination", selection: Binding(
-                            get: { pageDelimChar },
-                            set: { pageDelimChar = $0; model.update { $0.pageDelimiter = pageDelimChar.rawValue } }
-                        )) {
-                            ForEach(PageSeparator.allCases) { sep in
-                                Text(sep.displayName).tag(sep)
-                            }
-                        }
-                        .padding(.leading, 18)
-                        Text("Avec « \(pageDelimChar.rawValue) » : Be.a.S1.1989_1\(pageDelimChar.rawValue)1, Be.a.S1.1989_1\(pageDelimChar.rawValue)2, Be.a.S1.1989_1\(pageDelimChar.rawValue)3 → un seul document « Be.a.S1.1989_1 » de 3 pages. Un fichier sans numéro de page (Be.a.S1.1989_1) devient un document d'une seule pièce, sous ce nom.")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-
-                Section("Filigrane") {
-                    Toggle("Apposer un filigrane sur chaque page", isOn: toggle(\.watermarkEnabled))
-                    if model.config.watermarkEnabled {
-                        Picker("Type", selection: Binding(
-                            get: { model.config.watermarkType },
-                            set: { v in model.update { $0.watermarkType = v } })) {
-                            Text("Texte").tag("text")
-                            Text("Image (PNG)").tag("image")
-                        }
-                        .pickerStyle(.segmented)
-                        if model.config.watermarkType == "image" {
-                            HStack {
-                                TextField("Fichier image (PNG, JPEG…)", text: Binding(
-                                    get: { model.config.watermarkImagePath },
-                                    set: { v in model.update { $0.watermarkImagePath = v } }))
-                                    .textFieldStyle(.roundedBorder)
-                                Button("Choisir…") { chooseWatermarkImage() }
-                            }
-                            Text(watermarkImageStatus)
-                                .font(.caption).foregroundStyle(watermarkImageOK ? Color.secondary : Color.orange)
-                        } else {
-                            // Liaison DIRECTE : chaque frappe est persistée dans config.json (le champ ne
-                            // dépend plus d'un « Entrée »/bouton — sinon le texte tapé pouvait être perdu).
-                            TextField("Texte (ex. ARCHIVES FVJC)", text: Binding(
-                                get: { model.config.watermarkText },
-                                set: { v in model.update { $0.watermarkText = v } }))
-                                .textFieldStyle(.roundedBorder)
-                        }
-                        Picker("Placement", selection: Binding(
-                            get: { model.config.watermarkPosition },
-                            set: { v in model.update { $0.watermarkPosition = v } })) {
-                            Text("Diagonale").tag("diagonal")
-                            Text("Centre").tag("center")
-                            Text("Haut").tag("top")
-                            Text("Bas").tag("bottom")
-                            Text("Mosaïque").tag("tile")
-                        }
-                        Stepper(value: Binding(get: { model.config.watermarkOpacity },
-                                               set: { v in model.update { $0.watermarkOpacity = v } }),
-                                in: 5...100, step: 5) {
-                            Text("Opacité : \(model.config.watermarkOpacity) %")
-                        }
-                        Toggle("En dur (fusionné, non supprimable)", isOn: toggle(\.watermarkHard))
-                        Text(model.config.watermarkHard
-                             ? "Fusionné définitivement dans le PDF (impossible à retirer)."
-                             : "Ajouté comme calque « Filigrane » masquable/supprimable dans un lecteur PDF.")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-
-                Section("Fiche archivistique (ISAD)") {
-                    Toggle("Générer une fiche texte ISAD à côté du PDF", isOn: toggle(\.isadEnabled))
-                    if model.config.isadEnabled {
-                        // Menu des modèles réellement installés sur ce Mac. Repli en saisie libre si
-                        // Ollama est injoignable, pour pouvoir préparer le réglage hors ligne.
-                        if model.ollamaModels.isEmpty {
-                            TextField("Modèle Ollama", text: Binding(
-                                get: { model.config.isadModel },
-                                set: { v in model.update { $0.isadModel = v } }))
-                                .textFieldStyle(.roundedBorder)
-                        } else {
-                            Picker("Modèle installé", selection: Binding(
-                                get: { model.config.isadModel },
-                                set: { v in model.update { $0.isadModel = v } })) {
-                                ForEach(model.isadModelChoices, id: \.self) { name in
-                                    Text(name).tag(name)
-                                }
-                            }
-                        }
-                        HStack {
-                            Button("Actualiser la liste") { model.refreshOllamaModels() }
-                            Spacer()
-                            if !model.ollamaStatus.isEmpty {
-                                Text(model.ollamaStatus).font(.caption).foregroundStyle(.secondary)
-                                    .lineLimit(1).truncationMode(.middle)
-                            }
-                        }
-                        TextField("Adresse Ollama", text: Binding(
-                            get: { model.config.isadHost },
-                            set: { v in model.update { $0.isadHost = v } }))
-                            .textFieldStyle(.roundedBorder)
-                        Text("Après chaque PDF, le texte OCR est résumé par un modèle local (Ollama) en champs ISAD(G) : dates, étendue, histoire archivistique, portée et contenu, mots-clés. Le résultat est écrit dans un fichier « .txt » portant le même nom que le PDF. Si Ollama n'est pas démarré, ScanToPDF le lance automatiquement ; le modèle doit être installé (« ollama pull \(model.config.isadModel) »). En cas d'échec, le PDF est produit normalement, sans fiche.")
-                            .font(.caption).foregroundStyle(.secondary)
-
-                        Divider()
-                        Text("Contexte transmis au modèle")
-                        Text("Décrit le fonds pour éviter les contresens (sigles, lieux, vocabulaire). Modifiable librement : il est envoyé tel quel avant chaque demande de description.")
-                            .font(.caption).foregroundStyle(.secondary)
-                        TextEditor(text: Binding(
-                            get: { model.config.isadContext },
-                            set: { v in model.update { $0.isadContext = v } }))
-                            .font(.system(size: 11))
-                            .frame(height: 170)
-                            .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.secondary.opacity(0.35)))
-                        HStack {
-                            Button("Rétablir le contexte par défaut") {
-                                model.update { $0.isadContext = AppConfig.defaultIsadContext }
-                            }
-                            Spacer()
-                            Text("\(model.config.isadContext.count) caractères")
-                                .font(.caption2).foregroundStyle(.tertiary)
-                        }
-                    }
-                }
-
-                Section("Application") {
-                    Toggle("Démarrer avec le système", isOn: toggle(\.startAtLogin))
-                    Toggle("Mises à jour entre Mac du réseau (Bonjour)", isOn: toggle(\.networkEnabled))
-                    Toggle("Vérification des releases GitHub", isOn: toggle(\.remoteUpdateEnabled))
-                    Text("Toutes les 24 h, l'app vérifie s'il existe une version plus récente sur GitHub.").font(.caption).foregroundStyle(.secondary)
-                    if model.config.networkEnabled {
-                        HStack {
-                            SecureField("Phrase secrète (optionnelle)", text: $passphrase)
-                                .textFieldStyle(.roundedBorder)
-                                .onSubmit { model.setClusterPassphrase(passphrase) }
-                            Button("Appliquer") { model.setClusterPassphrase(passphrase) }
-                        }
-                        Text("Sécurise les mises à jour : seuls les Mac partageant la MÊME phrase se mettent à jour entre eux. Laisser vide = tous les ScanToPDF du réseau.")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-
-                Section("Destination (lecteur réseau)") {
-                    Toggle("Publier le résultat sur un lecteur réseau", isOn: toggle(\.exportEnabled))
-                    if model.config.exportEnabled {
-                        // Liste des lecteurs SMB RÉELLEMENT montés. Le lecteur enregistré y figure même
-                        // s'il est démonté, pour rester visible et ne pas paraître perdu.
-                        Picker("Lecteur", selection: Binding(
-                            get: { model.config.nasVolumePath },
-                            set: { path in
-                                if let v = model.nasVolumes.first(where: { $0.path == path }) {
-                                    model.selectNASVolume(v)
-                                }
-                            })) {
-                            if model.config.nasVolumePath.isEmpty {
-                                Text("— aucun —").tag("")
-                            } else if !model.nasVolumes.contains(where: { $0.path == model.config.nasVolumePath }) {
-                                Text("\((model.config.nasVolumePath as NSString).lastPathComponent) (non monté)")
-                                    .tag(model.config.nasVolumePath)
-                            }
-                            ForEach(model.nasVolumes) { v in Text(v.name).tag(v.path) }
-                        }
-                        .disabled(model.config.nasLocked)
-
-                        HStack {
-                            Button("Actualiser la liste") { model.refreshNASVolumes() }
-                                .disabled(model.config.nasLocked)
-                            Button("Monter maintenant") { model.connectNAS() }
-                            Spacer()
-                            Button {
-                                model.setNASLock(!model.config.nasLocked)
-                            } label: {
-                                Label(model.config.nasLocked ? "Déverrouiller" : "Verrouiller",
-                                      systemImage: model.config.nasLocked ? "lock.fill" : "lock.open")
-                            }
-                        }
-
-                        TextField("Sous-dossier racine (optionnel)", text: $nasSubpath)
-                            .textFieldStyle(.roundedBorder)
-                            .disabled(model.config.nasLocked)
-                            .onSubmit { saveNAS() }
-                        if !model.config.nasLocked {
-                            Button("Enregistrer le sous-dossier") { saveNAS() }
-                        }
-
-                        if !model.nasStatus.isEmpty {
-                            Text(model.nasStatus).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                        }
-                        Text(model.config.nasLocked
-                             ? "🔒 Réglages verrouillés : le mot de passe administrateur du Mac est requis pour changer de lecteur."
-                             : "Seuls les lecteurs réseau SMB montés sont proposés. Le lecteur retenu est mémorisé et remonté automatiquement s'il a été éjecté ; le mot de passe du partage est demandé par macOS et conservé dans le Trousseau — jamais par l'application.")
-                            .font(.caption).foregroundStyle(.secondary)
-                        Text("Le résultat est classé selon son nom (« Eg.w.O0.… » → dossiers Eg / w / O0). Sans lecteur monté, rien n'est publié : le PDF reste dans le dossier surveillé.")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                }
+            TabView {
+                dossierTab.tabItem { Label("Dossier", systemImage: "folder") }
+                traitementTab.tabItem { Label("Traitement", systemImage: "wand.and.stars") }
+                filigraneTab.tabItem { Label("Filigrane", systemImage: "drop") }
+                ficheTab.tabItem { Label("Fiche ISAD", systemImage: "doc.text.magnifyingglass") }
+                publicationTab.tabItem { Label("Publication", systemImage: "externaldrive.connected.to.line.below") }
+                applicationTab.tabItem { Label("Application", systemImage: "gearshape") }
             }
-            .formStyle(.grouped)
+            .padding(.top, 8)
 
             Divider()
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("ScanToPDF v\(AppVersion.short) (build \(AppVersion.build))")
-                        .font(.caption).foregroundStyle(.secondary)
-                    if AppVersion.hasRevision {
-                        Text("revision \(AppVersion.revision)")
-                            .font(.caption2).foregroundStyle(.tertiary)
-                    }
-                }
-                Spacer()
-                Button("Vérifier les MAJ…") { model.checkRemoteUpdates() }
-                    .buttonStyle(.borderless)
-                    .font(.caption)
-                if !model.status.isEmpty {
-                    Text(model.status).font(.caption).foregroundStyle(.secondary)
-                        .lineLimit(1).truncationMode(.middle)
-                }
-            }
-            .padding(.horizontal, 14).padding(.vertical, 8)
+            footer
         }
-        .frame(width: 460, height: 600)
-        .onChange(of: model.config.watchFolder) { _, new in folder = new }
-        .onChange(of: model.config.pageDelimiter) { _, new in
-            if let sep = PageSeparator(rawValue: new) { pageDelimChar = sep }
-        }
-        // Liste des modèles Ollama : chargée à l'ouverture des préférences et à l'activation de la
-        // fiche ISAD (pas au démarrage de l'app : inutile de solliciter Ollama tant qu'on n'y touche pas).
+        .frame(width: 580, height: 640)
         .onAppear {
+            draft = model.config
             if model.config.isadEnabled { model.refreshOllamaModels() }
             if model.config.exportEnabled { model.refreshNASVolumes() }
         }
-        .onChange(of: model.config.exportEnabled) { _, on in if on { model.refreshNASVolumes() } }
-        .onChange(of: model.config.isadEnabled) { _, enabled in
-            if enabled { model.refreshOllamaModels() }
+        // Les actions immédiates modifient la config hors brouillon : on resynchronise.
+        .onChange(of: model.config) { _, new in
+            if !dirty { draft = new } else { draft.nasLocked = new.nasLocked }
         }
+        .onChange(of: draft.isadEnabled) { _, on in if on { model.refreshOllamaModels() } }
+        .onChange(of: draft.exportEnabled) { _, on in if on { model.refreshNASVolumes() } }
     }
 
+    // MARK: - barre de validation
+    private var footer: some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("ScanToPDF v\(AppVersion.short) (build \(AppVersion.build))")
+                    .font(.caption).foregroundStyle(.secondary)
+                if AppVersion.hasRevision {
+                    Text("revision \(AppVersion.revision)").font(.caption2).foregroundStyle(.tertiary)
+                }
+            }
+            Spacer()
+            if dirty {
+                Text("Modifications non enregistrées")
+                    .font(.caption).foregroundStyle(.orange)
+                Button("Annuler") { draft = model.config }
+                Button("Enregistrer") { model.applyConfig(draft) }
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.defaultAction)
+            } else if !model.status.isEmpty {
+                Text(model.status).font(.caption).foregroundStyle(.secondary)
+                    .lineLimit(1).truncationMode(.middle)
+            }
+        }
+        .padding(.horizontal, 14).padding(.vertical, 10)
+    }
+
+    // MARK: - onglet Dossier
+    private var dossierTab: some View {
+        Form {
+            Section("Dossier surveillé") {
+                TextField("Chemin", text: b(\.watchFolder)).textFieldStyle(.roundedBorder)
+                HStack {
+                    Button("Choisir…") { chooseFolder() }
+                    Button("Ouvrir le dossier") { model.openWatchFolder() }
+                    Spacer()
+                    Button("Traiter maintenant") { model.processNow() }
+                }
+                Text("Les TIFF et les PDF déposés ici sont traités de façon identique et convertis en PDF/A.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
+            Section("Regroupement des fichiers") {
+                Text("Un seul caractère détermine le découpage : celui qui précède le NUMÉRO DE PAGE. Tout ce qui le précède est la cote, conservée telle quelle pour le dossier et le PDF produit — TIFF et PDF suivent la même règle.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Picker("Séparateur de pagination", selection: Binding(
+                    get: { PageSeparator(rawValue: draft.pageDelimiter) ?? .dash },
+                    set: { draft.pageDelimiter = $0.rawValue })) {
+                    ForEach(PageSeparator.allCases) { Text($0.displayName).tag($0) }
+                }
+                Text("Avec « \(draft.pageDelimiter) » : Be.a.S1.1989_1\(draft.pageDelimiter)1, \(draft.pageDelimiter)2, \(draft.pageDelimiter)3 → un seul document « Be.a.S1.1989_1 » de 3 pages. Un fichier sans numéro de page devient un document d'une seule pièce, sous ce nom.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    // MARK: - onglet Traitement
+    private var traitementTab: some View {
+        Form {
+            Section("Reconnaissance de texte") {
+                Toggle("OCR — couche texte (français + anglais)", isOn: b(\.ocr))
+                if draft.ocr {
+                    Picker("Mise en page (colonnes)", selection: b(\.tesseractPSM)) {
+                        Text("Automatique (détecte les colonnes)").tag(3)
+                        Text("Colonne unique").tag(4)
+                        Text("Bloc de texte").tag(6)
+                    }
+                    Picker("Binarisation (qualité scan)", selection: b(\.ocrThreshold)) {
+                        Text("Adaptative (recommandé)").tag("adaptive-otsu")
+                        Text("Sauvola (documents anciens)").tag("sauvola")
+                        Text("Standard").tag("auto")
+                    }
+                }
+            }
+            Section("Corrections d'image") {
+                Toggle("Rotation automatique de l'orientation", isOn: b(\.rotate))
+                if draft.rotate {
+                    Stepper(value: b(\.rotateThreshold), in: 2...60, step: 1) {
+                        Text("Seuil de confiance : \(draft.rotateThreshold) — plus élevé = moins d'erreurs")
+                    }
+                }
+                Toggle("Redressement des pages inclinées (deskew)", isOn: b(\.deskew))
+                Toggle("Nettoyage de l'image (unpaper)", isOn: b(\.clean))
+            }
+            Section("Sortie") {
+                Toggle("Compression", isOn: b(\.compress))
+                if draft.compress {
+                    Stepper(value: b(\.dpi), in: 72...600, step: 25) {
+                        Text("Résolution cible : \(draft.dpi) DPI")
+                    }
+                }
+                Toggle("Sortie PDF/A-2b (archivage normalisé)", isOn: b(\.pdfa))
+                Toggle("Supprimer les originaux après traitement", isOn: b(\.deleteOriginals))
+                Text(draft.deleteOriginals
+                     ? "⚠️ Les originaux (TIFF et PDF) seront supprimés après génération du PDF."
+                     : "Les originaux (TIFF et PDF) sont conservés dans le sous-dossier du projet.")
+                    .font(.caption).foregroundStyle(draft.deleteOriginals ? Color.orange : Color.secondary)
+                Toggle("Notification macOS en fin de traitement", isOn: b(\.notify))
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    // MARK: - onglet Filigrane
+    private var filigraneTab: some View {
+        Form {
+            Section("Filigrane") {
+                Toggle("Apposer un filigrane sur chaque page", isOn: b(\.watermarkEnabled))
+                if draft.watermarkEnabled {
+                    Picker("Type", selection: b(\.watermarkType)) {
+                        Text("Texte").tag("text")
+                        Text("Image (PNG)").tag("image")
+                    }
+                    .pickerStyle(.segmented)
+                    if draft.watermarkType == "image" {
+                        HStack {
+                            TextField("Fichier image (PNG, JPEG…)", text: b(\.watermarkImagePath))
+                                .textFieldStyle(.roundedBorder)
+                            Button("Choisir…") { chooseWatermarkImage() }
+                        }
+                        Text(watermarkImageStatus)
+                            .font(.caption).foregroundStyle(watermarkImageOK ? Color.secondary : Color.orange)
+                    } else {
+                        TextField("Texte (ex. ARCHIVES FVJC)", text: b(\.watermarkText))
+                            .textFieldStyle(.roundedBorder)
+                    }
+                    Picker("Placement", selection: b(\.watermarkPosition)) {
+                        Text("Diagonale").tag("diagonal")
+                        Text("Centre").tag("center")
+                        Text("Haut").tag("top")
+                        Text("Bas").tag("bottom")
+                        Text("Mosaïque").tag("tile")
+                    }
+                    Stepper(value: b(\.watermarkOpacity), in: 5...100, step: 5) {
+                        Text("Opacité : \(draft.watermarkOpacity) %")
+                    }
+                    Toggle("En dur (fusionné, non supprimable)", isOn: b(\.watermarkHard))
+                    Text(draft.watermarkHard
+                         ? "Fusionné définitivement dans le PDF (impossible à retirer)."
+                         : "Ajouté comme calque « Filigrane » masquable/supprimable dans un lecteur PDF.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    // MARK: - onglet Fiche ISAD
+    private var ficheTab: some View {
+        Form {
+            Section("Fiche archivistique (ISAD)") {
+                Toggle("Générer une fiche texte ISAD à côté du PDF", isOn: b(\.isadEnabled))
+                if draft.isadEnabled {
+                    if model.ollamaModels.isEmpty {
+                        TextField("Modèle Ollama", text: b(\.isadModel)).textFieldStyle(.roundedBorder)
+                    } else {
+                        Picker("Modèle installé", selection: b(\.isadModel)) {
+                            ForEach(modelChoices, id: \.self) { Text($0).tag($0) }
+                        }
+                    }
+                    HStack {
+                        Button("Actualiser la liste") { model.refreshOllamaModels() }
+                        Spacer()
+                        if !model.ollamaStatus.isEmpty {
+                            Text(model.ollamaStatus).font(.caption).foregroundStyle(.secondary)
+                                .lineLimit(1).truncationMode(.middle)
+                        }
+                    }
+                    TextField("Adresse Ollama", text: b(\.isadHost)).textFieldStyle(.roundedBorder)
+                    Text("Après chaque PDF, le texte OCR est résumé par un modèle local en champs ISAD(G). Si Ollama n'est pas démarré, ScanToPDF le lance. En cas d'échec, le PDF est produit normalement, sans fiche.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            if draft.isadEnabled {
+                Section("Contexte transmis au modèle") {
+                    Text("Décrit le fonds pour éviter les contresens (sigles, lieux, vocabulaire). Envoyé tel quel avant chaque demande de description.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    TextEditor(text: b(\.isadContext))
+                        .font(.system(size: 11))
+                        .frame(height: 200)
+                        .overlay(RoundedRectangle(cornerRadius: 5).stroke(Color.secondary.opacity(0.35)))
+                    HStack {
+                        Button("Rétablir le contexte par défaut") {
+                            draft.isadContext = AppConfig.defaultIsadContext
+                        }
+                        Spacer()
+                        Text("\(draft.isadContext.count) caractères")
+                            .font(.caption2).foregroundStyle(.tertiary)
+                    }
+                }
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    // MARK: - onglet Publication
+    private var publicationTab: some View {
+        Form {
+            Section("Lecteur réseau (SMB)") {
+                Toggle("Publier le résultat sur un lecteur réseau", isOn: b(\.exportEnabled))
+                if draft.exportEnabled {
+                    Picker("Lecteur", selection: Binding(
+                        get: { draft.nasVolumePath },
+                        set: { path in
+                            guard let v = model.nasVolumes.first(where: { $0.path == path }) else { return }
+                            draft.nasVolumePath = v.path
+                            draft.nasMountFrom = v.mountFrom
+                        })) {
+                        if draft.nasVolumePath.isEmpty {
+                            Text("— aucun —").tag("")
+                        } else if !model.nasVolumes.contains(where: { $0.path == draft.nasVolumePath }) {
+                            Text("\((draft.nasVolumePath as NSString).lastPathComponent) (non monté)")
+                                .tag(draft.nasVolumePath)
+                        }
+                        ForEach(model.nasVolumes) { Text($0.name).tag($0.path) }
+                    }
+                    .disabled(model.config.nasLocked)
+
+                    HStack {
+                        Button("Actualiser la liste") { model.refreshNASVolumes() }
+                            .disabled(model.config.nasLocked)
+                        Button("Monter maintenant") { model.connectNAS() }
+                        Spacer()
+                        Button {
+                            model.setNASLock(!model.config.nasLocked)
+                        } label: {
+                            Label(model.config.nasLocked ? "Déverrouiller" : "Verrouiller",
+                                  systemImage: model.config.nasLocked ? "lock.fill" : "lock.open")
+                        }
+                    }
+                    TextField("Sous-dossier racine (optionnel)", text: b(\.nasSubpath))
+                        .textFieldStyle(.roundedBorder)
+                        .disabled(model.config.nasLocked)
+                    if !model.nasStatus.isEmpty {
+                        Text(model.nasStatus).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                    }
+                    Text(model.config.nasLocked
+                         ? "🔒 Verrouillé : le mot de passe administrateur du Mac est requis pour changer de lecteur."
+                         : "Seuls les lecteurs SMB montés sont proposés. Le lecteur retenu est remonté automatiquement s'il a été éjecté ; son mot de passe est demandé par macOS et gardé dans le Trousseau — jamais par l'application.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Text("Le résultat est classé selon sa cote (« Eg.w.O0.… » → dossiers Eg / w / O0). Sans lecteur monté, rien n'est publié.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    // MARK: - onglet Application
+    private var applicationTab: some View {
+        Form {
+            Section("Démarrage et mises à jour") {
+                Toggle("Démarrer avec le système", isOn: b(\.startAtLogin))
+                Toggle("Mises à jour entre Mac du réseau (Bonjour)", isOn: b(\.networkEnabled))
+                Toggle("Vérification des releases GitHub", isOn: b(\.remoteUpdateEnabled))
+                Text("Toutes les 24 h, l'app vérifie s'il existe une version plus récente sur GitHub.")
+                    .font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    Button("Vérifier les mises à jour maintenant") { model.checkRemoteUpdates() }
+                    Spacer()
+                }
+            }
+            if draft.networkEnabled {
+                Section("Réseau local") {
+                    HStack {
+                        SecureField("Phrase secrète (optionnelle)", text: $passphrase)
+                            .textFieldStyle(.roundedBorder)
+                        Button("Appliquer") { model.setClusterPassphrase(passphrase) }
+                    }
+                    Text("Sécurise les mises à jour : seuls les Mac partageant la MÊME phrase se mettent à jour entre eux. Laisser vide = tous les ScanToPDF du réseau.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    // MARK: - bandeaux
     private var legacyBanner: some View {
         HStack(spacing: 10) {
             Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
             Text("Ancien automatisme détecté (« com.fvjc.archivage ») — il fait doublon.")
                 .font(.callout).lineLimit(2)
             Spacer()
-            if model.legacyRemoving {
-                ProgressView().controlSize(.small)
-            } else {
-                Button("Supprimer") { model.removeLegacy() }.buttonStyle(.borderedProminent)
-            }
+            if model.legacyRemoving { ProgressView().controlSize(.small) }
+            else { Button("Supprimer") { model.removeLegacy() }.buttonStyle(.borderedProminent) }
         }
         .padding(.horizontal, 14).padding(.vertical, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -369,7 +372,7 @@ struct SettingsView: View {
             } else if model.updateIsRemote {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Nouvelle version disponible sur GitHub").font(.callout)
-                    Text("Version \(model.updateRemoteVersion) (vous avez la \(AppVersion.short)) — consultez les releases pour télécharger.")
+                    Text("Version \(model.updateRemoteVersion) (vous avez la \(AppVersion.short))")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -390,6 +393,27 @@ struct SettingsView: View {
         .background(.thinMaterial)
     }
 
+    // MARK: - helpers
+    /// Le modèle enregistré peut ne plus être installé : on le garde dans le menu pour que la valeur
+    /// réellement utilisée reste visible au lieu d'une ligne vide.
+    private var modelChoices: [String] {
+        let current = draft.isadModel
+        guard !current.isEmpty, !model.ollamaModels.contains(current) else { return model.ollamaModels }
+        return model.ollamaModels + [current]
+    }
+
+    private var watermarkImageOK: Bool {
+        let p = draft.watermarkImagePath
+        return p.hasPrefix("/") && FileManager.default.fileExists(atPath: p)
+    }
+
+    private var watermarkImageStatus: String {
+        if draft.watermarkImagePath.isEmpty { return "Choisissez une image — la transparence du PNG est conservée." }
+        return watermarkImageOK
+            ? "Image trouvée : la transparence est conservée, l'opacité éclaircit le motif."
+            : "⚠️ Fichier introuvable — aucun filigrane ne sera apposé."
+    }
+
     private func openGitHubRelease() {
         if let url = URL(string: "https://github.com/Trano89/ScanToPDF/releases") {
             NSWorkspace.shared.open(url)
@@ -401,30 +425,8 @@ struct SettingsView: View {
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
-        panel.directoryURL = URL(fileURLWithPath: folder)
-        if panel.runModal() == .OK, let url = panel.url {
-            folder = url.path
-            model.update { $0.watchFolder = url.path }
-        }
-    }
-
-    private func saveNAS() {
-        guard !model.config.nasLocked else { return }
-        model.update { $0.nasSubpath = nasSubpath.trimmingCharacters(in: .whitespaces) }
-    }
-
-    // Filigrane image : même validation que le moteur (chemin ABSOLU + fichier existant), affichée à
-    // l'utilisateur — sinon un chemin invalide désactiverait le filigrane sans explication visible.
-    private var watermarkImageOK: Bool {
-        let p = model.config.watermarkImagePath
-        return p.hasPrefix("/") && FileManager.default.fileExists(atPath: p)
-    }
-
-    private var watermarkImageStatus: String {
-        if model.config.watermarkImagePath.isEmpty { return "Choisissez une image — la transparence du PNG est conservée." }
-        return watermarkImageOK
-            ? "Image trouvée : la transparence est conservée, l'opacité éclaircit le motif."
-            : "⚠️ Fichier introuvable — aucun filigrane ne sera apposé."
+        panel.directoryURL = URL(fileURLWithPath: draft.watchFolder)
+        if panel.runModal() == .OK, let url = panel.url { draft.watchFolder = url.path }
     }
 
     private func chooseWatermarkImage() {
@@ -433,13 +435,9 @@ struct SettingsView: View {
         panel.canChooseFiles = true
         panel.allowsMultipleSelection = false
         panel.allowedContentTypes = [.png, .jpeg, .tiff]
-        if !model.config.watermarkImagePath.isEmpty {
-            panel.directoryURL = URL(fileURLWithPath: model.config.watermarkImagePath).deletingLastPathComponent()
+        if !draft.watermarkImagePath.isEmpty {
+            panel.directoryURL = URL(fileURLWithPath: draft.watermarkImagePath).deletingLastPathComponent()
         }
-        if panel.runModal() == .OK, let url = panel.url {
-            model.update { $0.watermarkImagePath = url.path }
-        }
+        if panel.runModal() == .OK, let url = panel.url { draft.watermarkImagePath = url.path }
     }
-
-
 }

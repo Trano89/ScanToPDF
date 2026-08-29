@@ -28,6 +28,15 @@ ScanToPDF automates the processing of bulk document scans. Instead of manually a
 
 ## Changelog
 
+### v1.0.21 — Preferences in tabs, AtoM groundwork
+
+- Preferences are split into six **tabs** (Dossier, Traitement, Filigrane, Fiche ISAD, Publication,
+  Application) instead of one long page
+- Settings are edited in a **draft** and applied by an explicit **Enregistrer** button, with an
+  "unsaved changes" indicator and a Cancel button
+- Groundwork for publishing to AtoM: reading an existing description by its reference code and
+  comparing it field by field with what ScanToPDF proposes (verified against archives.fvjc.ch)
+
 ### v1.0.20 — Network publication rebuilt around the drive
 
 - The destination is now picked from a **drop-down of the SMB drives actually mounted**; internal

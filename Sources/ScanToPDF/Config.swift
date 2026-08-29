@@ -3,7 +3,7 @@ import Foundation
 // Configuration persistée dans /Users/Shared/ScanToPDF/config.json.
 // C'est CE fichier que lit le moteur Python (archivage_workflow.py) à chaque traitement :
 // décocher une case ici change le comportement du pipeline sans recompiler.
-struct AppConfig: Codable {
+struct AppConfig: Codable, Equatable {
     var watchFolder: String = "/Users/Shared/FVJC_SCAN"   // dossier surveillé
     // Regroupement des fichiers par document / page — règle UNIQUE, valable pour les TIFF comme pour
     // les PDF : « <cote><pageDelimiter><n° de page> ». Tout ce qui précède le délimiteur est la COTE,
