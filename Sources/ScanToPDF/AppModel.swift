@@ -287,6 +287,7 @@ final class AppModel: ObservableObject {
         let pdfPath = line[arrow.upperBound...].trimmingCharacters(in: .whitespaces)
         guard pdfPath.hasSuffix(".pdf") else { return }
         let pdf = URL(fileURLWithPath: pdfPath)
+        AtomClient.log("projet terminé détecté : \(pdf.deletingPathExtension().lastPathComponent)")
         prepareAtomPublication(pdf: pdf)
     }
 
@@ -336,11 +337,39 @@ final class AppModel: ObservableObject {
 
     /// Construit la comparaison entre la notice AtoM (si elle existe, dans ses DEUX écritures de cote)
     /// et ce que propose la fiche ISAD, puis ouvre l'écran de confirmation.
+    // Publier un projet DÉJÀ traité, sans repasser par l'OCR ni la fiche ISAD (plusieurs minutes).
+    // Indispensable quand la proposition automatique a été manquée — et seul moyen de rattraper un
+    // projet traité pendant qu'une surveillance résiduelle accaparait la sortie du moteur.
+    func publishExistingFolder() {
+        guard config.atomEnabled else {
+            atomStatus = "Publication AtoM désactivée dans les préférences."
+            return
+        }
+        let panel = NSOpenPanel()
+        panel.title = "Publier un dossier déjà traité"
+        panel.message = "Choisissez le dossier du projet (il doit contenir son PDF final)."
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = URL(fileURLWithPath: config.watchFolder)
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK, let folder = panel.url else { return }
+        let pdf = folder.appendingPathComponent(folder.lastPathComponent + ".pdf")
+        guard FileManager.default.fileExists(atPath: pdf.path) else {
+            atomStatus = "Aucun PDF « \(pdf.lastPathComponent) » dans ce dossier."
+            return
+        }
+        prepareAtomPublication(pdf: pdf)
+    }
+
     func prepareAtomPublication(pdf: URL) {
         // La connexion est demandée au PREMIER traitement de cette exécution ; renoncer annule la
         // publication mais ne touche en rien au PDF ni à la copie sur le lecteur réseau.
         ensureAtomSession { [weak self] ok in
-            guard ok else { self?.atomStatus = "Publication AtoM ignorée (non connecté)."; return }
+            guard ok else {
+                AtomClient.log("publication abandonnée : session non ouverte")
+                self?.atomStatus = "Publication AtoM ignorée (non connecté)."; return
+            }
             self?.lookupAtomPublication(pdf: pdf)
         }
     }
@@ -349,6 +378,7 @@ final class AppModel: ObservableObject {
         let folder = pdf.deletingLastPathComponent()
         let code = pdf.deletingPathExtension().lastPathComponent
         guard let base = URL(string: config.atomBaseURL) else { return }
+        AtomClient.log("recherche de la notice « \(code) »…")
         atomStatus = "Recherche de la notice « \(code) » dans AtoM…"
         Task { [weak self] in
             let fiche = folder.appendingPathComponent(code + ".txt")
@@ -369,8 +399,17 @@ final class AppModel: ObservableObject {
                 self.atomStatus = match == nil ? "Nouvelle notice à créer." : "Notice existante trouvée."
                 // Un passage du moteur peut terminer plusieurs projets : on les présente l'un après
                 // l'autre plutôt que d'écraser la fenêtre en cours de relecture.
-                if self.atomPending == nil { self.atomPending = p; self.openAtomWindow() }
-                else if !self.atomQueue.contains(where: { $0.code == p.code }) { self.atomQueue.append(p) }
+                AtomClient.log(match == nil
+                    ? "« \(code) » : AUCUNE notice trouvée dans AtoM"
+                    : "« \(code) » : notice /\(match!.slug) trouvée, \(p.fields.filter { $0.kind != .unchanged }.count) champ(s) à écrire")
+                if self.atomPending == nil {
+                    self.atomPending = p
+                    AtomClient.log("ouverture de la fenêtre de publication pour « \(code) »")
+                    self.openAtomWindow()
+                } else if !self.atomQueue.contains(where: { $0.code == p.code }) {
+                    self.atomQueue.append(p)
+                    AtomClient.log("« \(code) » mis en file (une publication est déjà à l'écran)")
+                }
             }
         }
     }

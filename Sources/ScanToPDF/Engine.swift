@@ -58,6 +58,7 @@ final class Engine {
         try? FileManager.default.createDirectory(at: AppPaths.logsDir, withIntermediateDirectories: true)
         // Le watcher gère lui-même la file d'attente ET le rattrapage initial (fichiers déjà présents).
         stop()
+        sweepLeftoverWatchers()
         stopping = false
         currentWatchFolder = watchFolder
         let p = Process()
@@ -139,6 +140,36 @@ final class Engine {
             (proc.standardOutput as? Pipe)?.fileHandleForReading.readabilityHandler = nil
         }
         try? p.run()
+    }
+
+    // Un watcher survit à une fin BRUTALE de l'application (quitté de force, plantage, bundle
+    // remplacé par une mise à jour) : launchd l'adopte et il continue de surveiller le dossier. Huit
+    // avaient ainsi survécu sur cette machine. Tous se disputent le verrou du workflow, et quand un
+    // ORPHELIN gagne il écrit son journal fichier mais sa sortie standard tombe dans un tube mort :
+    // la ligne « ✅ SUCCÈS » n'atteint jamais l'application, donc aucune publication n'est proposée.
+    // Le watcher se surveille désormais lui-même (PPID), mais on balaie ce qui traîne déjà — y
+    // compris les orphelins nés d'une version antérieure, qui n'ont pas cette garde.
+    private func sweepLeftoverWatchers() {
+        let find = Process()
+        find.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        find.arguments = ["-u", String(getuid()), "-f", "archivage_watcher.py"]
+        let out = Pipe()
+        find.standardOutput = out
+        find.standardError = FileHandle.nullDevice
+        do { try find.run() } catch { return }
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        find.waitUntilExit()
+        let mine = watcher?.processIdentifier ?? -1
+        let pids = (String(data: data, encoding: .utf8) ?? "")
+            .split(whereSeparator: \.isNewline)
+            .compactMap { Int32($0.trimmingCharacters(in: .whitespaces)) }
+            .filter { $0 != mine && $0 != getpid() }
+        guard !pids.isEmpty else { return }
+        for pid in pids { kill(pid, SIGTERM) }
+        let deadline = Date().addingTimeInterval(3)
+        while Date() < deadline && pids.contains(where: { kill($0, 0) == 0 }) { usleep(100_000) }
+        for pid in pids where kill(pid, 0) == 0 { kill(pid, SIGKILL) }
+        onLog("\(pids.count) surveillance(s) résiduelle(s) d'une exécution précédente arrêtée(s).")
     }
 
     // Arrêt SYNCHRONE et borné : SIGTERM (le watcher tue son sous-arbre OCR), attente, puis SIGKILL.

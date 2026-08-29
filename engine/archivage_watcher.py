@@ -245,9 +245,21 @@ def main():
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
 
+    # PID de l'application qui nous a lancés. S'il change, c'est que le parent est mort et que
+    # launchd nous a adoptés (PPID = 1).
+    parent0 = os.getppid()
+
     try:
         while not stop_evt.wait(0.5):
-            pass
+            # ORPHELIN — l'application a disparu (quitté de force, plantage, remplacement du bundle
+            # lors d'une mise à jour). Sans cette garde le watcher survivait indéfiniment, et CHAQUE
+            # lancement de l'app en ajoutait un : plusieurs watchers se disputaient alors le verrou
+            # du workflow. Le gagnant écrivait bien son journal fichier, mais s'il s'agissait d'un
+            # orphelin sa sortie standard partait dans un tube mort — l'application ne voyait donc
+            # jamais la ligne « SUCCÈS » et ne proposait plus aucune publication.
+            if os.getppid() != parent0:
+                logger.info("Application parente disparue — arrêt du watcher (plus d'orphelin).")
+                break
     finally:
         worker.stop()          # tue le workflow en cours (sous-arbre OCR) s'il y en a un
         observer.stop()

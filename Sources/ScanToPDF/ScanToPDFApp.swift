@@ -19,6 +19,7 @@ struct MenuContent: View {
     @ObservedObject private var model = AppModel.shared
     var body: some View {
         Button("Ouvrir") { model.openPreferences() }
+        Button("Publier un dossier dans AtoM…") { model.publishExistingFolder() }
         Divider()
         Button("Quitter ScanToPDF") { model.quit() }
     }
