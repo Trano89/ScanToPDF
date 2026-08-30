@@ -1148,8 +1148,13 @@ def _isad_prompt(ocr_text: str, project_name: str, fallback_date: str = "",
         "- N'emploie un terme du contexte que s'il figure réellement dans le document.\n"
         "- Réponds UNIQUEMENT avec les champs ci-dessous, dans cet ordre exact, chacun sur sa ou ses "
         "lignes, sans commentaire ni Markdown.\n\n"
-        "DATE: une date au format AAAA-MM-JJ, ou une plage « AAAA-MM-JJ - AAAA-MM-JJ » si le document "
-        "couvre plusieurs dates. Si seule l'année est connue, écris AAAA. Si inconnu, « Inconnu ».\n"
+        "DATE: date de création du document. Cherche-la PARTOUT : page de titre, en-tête, pied de page, "
+        "signature, mention d'achèvement, colophon — et en toutes lettres autant qu'en chiffres "
+        "(« février 2015 », « le 12 mars 1989 »). Écris AAAA-MM-JJ si le jour est connu, AAAA-MM si "
+        "seuls le mois et l'année le sont, AAAA si seule l'année l'est, ou une plage "
+        "« AAAA-MM-JJ - AAAA-MM-JJ » si le document couvre plusieurs dates. N'INVENTE JAMAIS une "
+        "composante absente : pas de jour pour un « février 2015 », pas de mois pour une simple année. "
+        "Aucune date dans le document → « Inconnu ».\n"
         + date_fallback +
         "ETENDUE: étendue et support (ISAD 3.1.5). Reprends OBLIGATOIREMENT le nombre de pages des "
         "DONNÉES FACTUELLES, sous la forme « <nature du document> de N pages », suivi du format "
@@ -1350,6 +1355,103 @@ def _isad_filter_places(value: str, ocr_text: str, logger: logging.Logger) -> st
     return ", ".join(kept) if kept else "Inconnu"
 
 
+MOIS_FR = {
+    "janvier": 1, "fevrier": 2, "mars": 3, "avril": 4, "mai": 5, "juin": 6, "juillet": 7,
+    "aout": 8, "septembre": 9, "octobre": 10, "novembre": 11, "decembre": 12,
+    "janv": 1, "fev": 2, "avr": 4, "juil": 7, "sept": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+
+
+def _sans_accents(s: str) -> str:
+    import unicodedata
+    return "".join(c for c in unicodedata.normalize("NFD", s) if unicodedata.category(c) != "Mn")
+
+
+def _isad_scan_dates(text: str) -> list:
+    """Relève les dates ÉCRITES DANS LE TEXTE, sans rien déduire ni compléter.
+
+    Le modèle laisse échapper des dates rédigées en toutes lettres (« février 2015 ») parce qu'il
+    cherche un format et non une formulation. Ce relevé déterministe les retrouve. Il ne rend que ce
+    qui figure littéralement : jamais un jour pour un « février 2015 », jamais une année déduite.
+
+    Rend une liste de (précision, date ISO, position), précision 3 = jour, 2 = mois, 1 = année.
+    """
+    t = _sans_accents(text.lower())
+    vus = []
+
+    def ajoute(prec, iso, pos):
+        vus.append((prec, iso, pos))
+
+    mois_alt = "|".join(sorted(MOIS_FR, key=len, reverse=True))
+    # « 12 février 2015 », « 1er mars 1989 »
+    for m in re.finditer(rf"\b(\d{{1,2}})\s*(?:er)?\s+({mois_alt})\.?\s+(\d{{4}})\b", t):
+        j, mo, a = int(m.group(1)), MOIS_FR[m.group(2)], int(m.group(3))
+        if 1 <= j <= 31 and 1800 <= a <= 2100:
+            ajoute(3, f"{a:04d}-{mo:02d}-{j:02d}", m.start())
+    # « février 2015 » (sans jour)
+    for m in re.finditer(rf"\b({mois_alt})\.?\s+(\d{{4}})\b", t):
+        mo, a = MOIS_FR[m.group(1)], int(m.group(2))
+        if 1800 <= a <= 2100:
+            ajoute(2, f"{a:04d}-{mo:02d}", m.start())
+    # « 12.02.2015 », « 12/02/2015 », « 12-02-2015 »
+    for m in re.finditer(r"\b(\d{1,2})[./-](\d{1,2})[./-](\d{4})\b", t):
+        j, mo, a = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if 1 <= j <= 31 and 1 <= mo <= 12 and 1800 <= a <= 2100:
+            ajoute(3, f"{a:04d}-{mo:02d}-{j:02d}", m.start())
+    # « 2015-02-12 »
+    for m in re.finditer(r"\b(\d{4})-(\d{2})-(\d{2})\b", t):
+        a, mo, j = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if 1 <= j <= 31 and 1 <= mo <= 12 and 1800 <= a <= 2100:
+            ajoute(3, f"{a:04d}-{mo:02d}-{j:02d}", m.start())
+    return vus
+
+
+def _isad_refine_date(valeur: str, ocr_text: str, logger: logging.Logger) -> str:
+    """Complète la date du modèle par ce que le TEXTE porte réellement — et seulement par cela.
+
+    Prudence délibérée : on n'ajoute une précision que si le texte est SANS AMBIGUÏTÉ. Plusieurs mois
+    concurrents pour la même année, ou plusieurs dates isolées sans rapport, et l'on s'abstient : une
+    date fausse dans une notice d'archives est pire qu'une date absente.
+    """
+    v = (valeur or "").strip()
+    if re.match(r"^\d{4}-\d{2}-\d{2}", v) or re.match(r"^\d{4}-\d{2}$", v):
+        return v                                   # déjà précis, on n'y touche pas
+    releve = _isad_scan_dates(ocr_text)
+    if not releve:
+        return v
+    annee = re.match(r"^(\d{4})$", v)
+    if annee:
+        a = annee.group(1)
+        # Affiner AAAA → AAAA-MM seulement si le texte ne propose qu'UN mois pour cette année.
+        mois = {iso[:7] for prec, iso, _ in releve if prec >= 2 and iso.startswith(a)}
+        if len(mois) == 1:
+            precise = _isad_plus_precise(releve, mois.pop())
+            logger.info(f"Fiche ISAD : date « {v} » précisée en « {precise} » d'après le texte.")
+            return precise
+        if len(mois) > 1:
+            logger.info(f"Fiche ISAD : {len(mois)} mois différents pour {a} dans le texte — "
+                        f"année conservée sans précision.")
+        return v
+    if v.lower().startswith("inconnu") or not v:
+        # Rien du modèle : n'accepter que si le texte désigne UN SEUL mois. « le 12 mars 1989 » est
+        # relevé deux fois — au jour et au mois — ce qui n'est pas une concurrence mais la même date
+        # à deux précisions : c'est le mois qui fait foi pour juger de l'ambiguïté.
+        mois = {iso[:7] for prec, iso, _ in releve if prec >= 2}
+        if len(mois) == 1:
+            trouve = _isad_plus_precise(releve, mois.pop())
+            logger.info(f"Fiche ISAD : aucune date du modèle — « {trouve} » relevée dans le texte.")
+            return trouve
+        logger.info(f"Fiche ISAD : aucune date du modèle et {len(mois)} mois différents dans le "
+                    f"texte — laissée « Inconnu » plutôt que de choisir au hasard.")
+    return v
+
+
+def _isad_plus_precise(releve: list, mois: str) -> str:
+    """Pour un mois donné, rend le jour s'il est unique dans le texte, sinon le mois seul."""
+    jours = {iso for prec, iso, _ in releve if prec == 3 and iso.startswith(mois)}
+    return jours.pop() if len(jours) == 1 else mois
+
+
 def _isad_clean_date(value: str) -> str:
     """« 1989-04-XX » → « 1989-04 » : le modèle comble parfois par des X les composantes inconnues,
     ce qui n'est pas une date exploitable dans un catalogue."""
@@ -1423,6 +1525,10 @@ def write_isad_sidecar(final_pdf: Path, ocr_text: str, project_name: str, logger
     # renseigne nous-mêmes — et on le SIGNALE : l'archiviste doit savoir que la date ne vient pas du
     # texte mais des métadonnées du fichier.
     date_note = ""
+    # Recherche approfondie DANS LE TEXTE avant tout repli : une date écrite dans le document prime
+    # sur celle du fichier, qui n'est que la date de fabrication du PDF.
+    if fields.get("DATE") is not None:
+        fields["DATE"] = _isad_refine_date(fields.get("DATE", ""), ocr_text, logger)
     if fallback_date and fields.get("DATE", "").strip().lower().startswith("inconnu"):
         fields["DATE"] = fallback_date
         date_note = "Date reprise des métadonnées du PDF d'origine (aucune date dans le texte).\n"
