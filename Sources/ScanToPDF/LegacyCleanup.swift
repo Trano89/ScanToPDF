@@ -30,22 +30,20 @@ enum LegacyCleanup {
         // Script exécuté EN ROOT via osascript. Chemins = constantes internes échappées (aucune entrée
         // utilisateur) → pas d'injection. On NE fait PAS de `pkill -f` sur un chemin (dangereux en root,
         // pourrait tuer un process tiers) : `bootout`/`unload` déchargent le service ET son process.
-        var lines = ["#!/bin/sh", "set +e"]
-        lines.append("/bin/launchctl bootout system/\(label) 2>/dev/null")
-        lines.append("/bin/launchctl disable system/\(label) 2>/dev/null")
+        // Les commandes sont passées EN LIGNE à osascript. Écrire d'abord un script sur disque, puis
+        // le faire exécuter EN ROOT, ouvrait une fenêtre d'élévation de privilège : un processus du
+        // même compte — qui n'a PAS les droits root — pouvait réécrire le fichier entre sa création
+        // et son exécution, et faire ainsi exécuter n'importe quoi en root. Plus de fichier, plus de
+        // fenêtre. Les chemins restent des constantes internes, échappées pour le shell.
+        var cmds = ["/bin/launchctl bootout system/\(label) 2>/dev/null",
+                    "/bin/launchctl disable system/\(label) 2>/dev/null"]
         for pl in existingPlists() {
-            lines.append("/bin/launchctl unload \(shq(pl)) 2>/dev/null")
-            lines.append("/bin/rm -f \(shq(pl))")
+            cmds.append("/bin/launchctl unload \(shq(pl)) 2>/dev/null")
+            cmds.append("/bin/rm -f \(shq(pl))")
         }
-        lines.append("exit 0")
-        let script = lines.joined(separator: "\n")
-
-        let tmp = NSTemporaryDirectory() + "scantopdf-legacy-\(UUID().uuidString).sh"
-        guard (try? script.write(toFile: tmp, atomically: true, encoding: .utf8)) != nil else { return "Préparation impossible." }
-        try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: tmp)
-        defer { try? FileManager.default.removeItem(atPath: tmp) }
-
-        let osa = "do shell script \"/bin/sh '\(tmp)'\" with administrator privileges"
+        cmds.append("exit 0")
+        let shell = cmds.joined(separator: "; ")
+        let osa = "do shell script \"\(asq(shell))\" with administrator privileges"
         let p = Process(); p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
         p.arguments = ["-e", osa]
         let err = Pipe(); p.standardOutput = Pipe(); p.standardError = err
@@ -62,6 +60,10 @@ enum LegacyCleanup {
     }
 
     private static func shq(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+    /// Échappement pour une chaîne littérale AppleScript (contre-obliques puis guillemets).
+    private static func asq(_ s: String) -> String {
+        s.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+    }
 
     static func log(_ s: String) { FileLog.append(s, to: "legacy.log") }
 }

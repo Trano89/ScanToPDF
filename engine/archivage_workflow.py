@@ -756,12 +756,18 @@ def finalize_pdf(src_pdf: Path, project_name: str, project_dir: Path, logger: lo
 # NETTOYAGE TEMP
 # ─────────────────────────────────────────────────────────────
 def cleanup_temp(logger: logging.Logger):
-    if TEMP_DIR.exists():
-        for item in TEMP_DIR.iterdir():
-            try:
+    """Vide le dossier de travail. Les SOUS-DOSSIERS étaient ignorés (unlink échoue sur un dossier,
+    l'erreur était avalée) : un répertoire laissé par un outil interrompu s'accumulait indéfiniment."""
+    if not TEMP_DIR.exists():
+        return
+    for item in TEMP_DIR.iterdir():
+        try:
+            if item.is_dir() and not item.is_symlink():
+                shutil.rmtree(item, ignore_errors=True)
+            else:
                 item.unlink()
-            except Exception:
-                pass
+        except Exception as exc:
+            logger.debug(f"Nettoyage : « {item.name} » non supprimé ({exc}).")
 
 
 # ─────────────────────────────────────────────────────────────

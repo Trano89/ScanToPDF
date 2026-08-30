@@ -4,6 +4,22 @@ import ServiceManagement
 import UserNotifications
 
 // Orchestrateur de l'application (instance unique partagée entre la barre de menus et le délégué).
+/// Fermer une fenêtre par son bouton rouge ne prévenait personne : la fenêtre de publication
+/// laissait alors « atomPending » figé et PLUS AUCUNE publication n'était proposée jusqu'au
+/// redémarrage ; la fenêtre de connexion bloquait de même toute la session. Ce délégué fait suivre
+/// la fermeture, d'où qu'elle vienne, et ne la fait suivre QU'UNE FOIS — un bouton « Annuler » qui
+/// ferme lui-même la fenêtre ne doit pas déclencher le traitement deux fois.
+final class WindowCloser: NSObject, NSWindowDelegate {
+    private var action: (() -> Void)?
+    init(_ action: @escaping () -> Void) { self.action = action }
+    func fire() {
+        let a = action
+        action = nil          // neutralisé AVANT l'appel : fermer la fenêtre dans l'action ne rappelle rien
+        a?()
+    }
+    func windowWillClose(_ notification: Notification) { fire() }
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     static let shared = AppModel()
@@ -35,6 +51,8 @@ final class AppModel: ObservableObject {
     private var atomLoginWindow: NSWindow?
     @Published var atomStatus = ""
     private var atomWindow: NSWindow?
+    private var atomCloser: WindowCloser?        // NSWindow.delegate est FAIBLE : à retenir ici
+    private var atomLoginCloser: WindowCloser?
     // Fiche ISAD : modèles Ollama installés sur ce Mac (menu des préférences) + statut de la recherche.
     @Published var ollamaModels: [String] = []
     @Published var ollamaStatus = ""
@@ -320,16 +338,26 @@ final class AppModel: ObservableObject {
         if atomLoginWindow != nil { done(false); return }
         let email = config.atomEmail
         let saved = AtomCredentials.password(for: email) ?? ""
-        let view = AtomLoginView(email: email, password: saved, remember: !saved.isEmpty) { [weak self] ok in
-            guard let self else { return }
-            self.atomLoginWindow?.close(); self.atomLoginWindow = nil
+        // Une fermeture par le bouton rouge vaut « Ignorer » : sans quoi la fenêtre restait
+        // référencée et toute publication ultérieure était refusée jusqu'au redémarrage.
+        var answered = false
+        let finish: (Bool) -> Void = { [weak self] ok in
+            guard let self, !answered else { return }
+            answered = true
+            self.atomLoginWindow?.close(); self.atomLoginWindow = nil; self.atomLoginCloser = nil
             done(ok)
+        }
+        let closer = WindowCloser { finish(false) }
+        let view = AtomLoginView(email: email, password: saved, remember: !saved.isEmpty) { ok in
+            finish(ok)
         }.environmentObject(self)
         let w = NSWindow(contentViewController: NSHostingController(rootView: view))
         w.title = "Connexion à AtoM"
         w.styleMask = [.titled, .closable]
         w.isReleasedWhenClosed = false
         w.center()
+        w.delegate = closer
+        atomLoginCloser = closer
         atomLoginWindow = w
         NSApp.activate(ignoringOtherApps: true)
         w.makeKeyAndOrderFront(nil)
@@ -519,12 +547,14 @@ final class AppModel: ObservableObject {
     private func openAtomWindow() {
         guard let p = atomPending else { return }
         atomWindow?.close()
-        let host = NSHostingController(rootView: AtomPublishView(publication: p) { [weak self] in
+        let closer = WindowCloser { [weak self] in
             guard let self else { return }
-            self.atomWindow?.close(); self.atomWindow = nil
+            self.atomWindow?.close(); self.atomWindow = nil; self.atomCloser = nil
             self.atomPending = self.atomQueue.isEmpty ? nil : self.atomQueue.removeFirst()
             if self.atomPending != nil { self.openAtomWindow() }
-        }.environmentObject(self))
+        }
+        let host = NSHostingController(rootView: AtomPublishView(publication: p) { closer.fire() }
+            .environmentObject(self))
         let w = NSWindow(contentViewController: host)
         w.title = "Publier dans AtoM — \(p.code)"
         // Redimensionnable : la portée et contenu peut compter plusieurs paragraphes, et une
@@ -532,6 +562,8 @@ final class AppModel: ObservableObject {
         w.styleMask = [.titled, .closable, .miniaturizable, .resizable]
         w.isReleasedWhenClosed = false
         w.center()
+        w.delegate = closer
+        atomCloser = closer
         atomWindow = w
         NSApp.activate(ignoringOtherApps: true)
         w.makeKeyAndOrderFront(nil)

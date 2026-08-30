@@ -738,9 +738,11 @@ enum AtomClient {
             return .failure(.rejected("enregistrement non vérifiable (notice illisible après import)"))
         }
         let saved = parseRecord(after)
+        // Champs de texte : la valeur enregistrée doit être EXACTEMENT celle envoyée.
         let control = [("extentAndMedium", saved.extentAndMedium),
                        ("archivalHistory", saved.archivalHistory),
-                       ("scopeAndContent", saved.scopeAndContent)]
+                       ("scopeAndContent", saved.scopeAndContent),
+                       ("repository", saved.repository)]
         for (key, now) in control {
             guard let expected = changes[key] else { continue }
             let a = now.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespaces)
@@ -748,6 +750,32 @@ enum AtomClient {
             if a != b {
                 log("ÉCHEC : « \(key) » vaut toujours « \(a.prefix(60)) » après import")
                 return .failure(.rejected("la notice n'a pas été modifiée par l'import"))
+            }
+        }
+        // Date : AtoM l'affiche suffixée de son type (« 2015-02-12 (Creation) »). On vérifie donc la
+        // PRÉSENCE de la date envoyée, pas une égalité de chaînes.
+        if let d = changes["eventDates"]?.trimmingCharacters(in: .whitespaces), !d.isEmpty,
+           !saved.date.contains(d) {
+            log("ÉCHEC : la date « \(d) » n'apparaît pas sur la notice (lue : « \(saved.date) »)")
+            return .failure(.rejected("la date n'a pas été enregistrée"))
+        }
+        // Mots-clés : chaque terme envoyé doit se retrouver sur la notice. On teste l'INCLUSION et non
+        // l'égalité — AtoM peut conserver des termes déjà en place, ce qui n'est pas un échec.
+        let terms: [(String, [String])] = [("subjectAccessPoints", saved.subjects),
+                                           ("placeAccessPoints", saved.places),
+                                           ("nameAccessPoints", saved.names),
+                                           ("genreAccessPoints", saved.genres)]
+        for (key, present) in terms {
+            guard let sent = changes[key], !sent.isEmpty else { continue }
+            let have = Set(present.map { $0.lowercased() })
+            let missing = sent.components(separatedBy: "|")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty && !have.contains($0.lowercased()) }
+            if !missing.isEmpty {
+                log("ÉCHEC : « \(key) » — terme(s) absent(s) après import : "
+                    + missing.prefix(6).joined(separator: ", "))
+                return .failure(.rejected("mots-clés non enregistrés : "
+                    + missing.prefix(4).joined(separator: ", ")))
             }
         }
         log("import VÉRIFIÉ par relecture de la notice")

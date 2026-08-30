@@ -205,8 +205,11 @@ enum AppPaths {
                                     attributes: [.posixPermissions: 0o2770, .groupOwnerAccountID: 20])
         }
         if fm.isWritableFile(atPath: sharedBase.path) { return sharedBase }
-        let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-            .appendingPathComponent("ScanToPDF", isDirectory: true)
+        // Repli de dernier recours. Un « ! » ici ferait planter l'app AU DÉMARRAGE si le système
+        // ne rendait aucune URL — improbable, mais fatal et sans message.
+        let home = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")
+        let base = home.appendingPathComponent("ScanToPDF", isDirectory: true)
         try? fm.createDirectory(at: base, withIntermediateDirectories: true)
         return base
     }()

@@ -385,8 +385,26 @@ struct SettingsView: View {
                             .textFieldStyle(.roundedBorder)
                         Button("Appliquer") { model.setClusterPassphrase(passphrase) }
                     }
-                    Text("Sécurise les mises à jour : seuls les Mac partageant la MÊME phrase se mettent à jour entre eux. Laisser vide = tous les ScanToPDF du réseau.")
-                        .font(.caption).foregroundStyle(.secondary)
+                    if model.clusterPassphrase.isEmpty {
+                        // Sans phrase, la clé de la liaison dérive d'une constante PUBLIÉE dans le
+                        // dépôt open source : n'importe quelle machine du réseau peut donc proposer
+                        // une mise à jour. L'installation reste soumise à un clic, mais l'invitation
+                        // ressemble à une invitation légitime. Le dire franchement plutôt que de
+                        // laisser croire à une protection.
+                        Label("Sans phrase secrète, toute machine du réseau peut proposer une mise à "
+                              + "jour à ce Mac : la clé de liaison dérive d'une constante publique du "
+                              + "code source. L'installation demande toujours votre accord, mais rien "
+                              + "ne distingue une proposition légitime d'une autre. Définir une phrase "
+                              + "ferme cette porte.",
+                              systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption).foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else {
+                        Label("Liaison protégée : seuls les Mac partageant cette phrase se mettent à "
+                              + "jour entre eux.", systemImage: "lock.fill")
+                            .font(.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
         }
@@ -427,6 +445,12 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Mise à jour disponible (« \(model.updatePeerName) »).").font(.callout)
                     Text("Build \(model.updatePeerBuild)").font(.caption).foregroundStyle(.secondary)
+                    if model.clusterPassphrase.isEmpty {
+                        Text("Provenance non authentifiée : aucune phrase secrète ne protège le "
+                             + "réseau. N'installez que si vous attendez cette mise à jour.")
+                            .font(.caption).foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
                 Spacer()
                 Button("Installer et redémarrer") { model.installUpdate() }.buttonStyle(.borderedProminent)
