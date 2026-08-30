@@ -527,7 +527,9 @@ final class AppModel: ObservableObject {
         }.environmentObject(self))
         let w = NSWindow(contentViewController: host)
         w.title = "Publier dans AtoM — \(p.code)"
-        w.styleMask = [.titled, .closable, .miniaturizable]
+        // Redimensionnable : la portée et contenu peut compter plusieurs paragraphes, et une
+        // fenêtre figée obligeait à relire un texte long dans un cadre de la taille d'un timbre.
+        w.styleMask = [.titled, .closable, .miniaturizable, .resizable]
         w.isReleasedWhenClosed = false
         w.center()
         atomWindow = w
