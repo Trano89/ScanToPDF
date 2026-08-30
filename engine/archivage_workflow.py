@@ -231,7 +231,11 @@ ISAD_CTX         = 131072
 # la fenêtre ci-dessus sans risque de troncature, même dans l'hypothèse basse de 4 caractères par jeton.
 ISAD_MAX_CHARS   = 480000
 ISAD_TIMEOUT     = 900      # secondes d'attente max (inclut le chargement à froid du modèle, ~40 s)
-ISAD_MAX_TOKENS  = 1500     # réponse bornée : huit champs n'en demandent pas davantage
+# Plafond de la réponse. À 1500, les huit champs se disputaient le budget et la PORTÉE — le champ
+# qui porte la description réelle — était la première rabotée. Valeur volontairement large : elle
+# borne les dérives sans brider un document riche, et reste très en deçà de la fenêtre de contexte.
+# Ce n'est PAS un dimensionnement tiré d'un échantillon de documents.
+ISAD_MAX_TOKENS  = 4000
 ISAD_START_WAIT  = 45       # secondes laissées à Ollama pour répondre après un démarrage automatique
 ISAD_MIN_TEXT    = 400      # en deçà, l'OCR n'a rien rendu d'exploitable → la fiche est signalée comme fragile
 
@@ -1146,8 +1150,12 @@ def _isad_prompt(ocr_text: str, project_name: str, fallback_date: str = "",
         "est annoncé non mesurable, n'invente aucune dimension.\n"
         "HISTOIRE: histoire archivistique (ISAD 3.2.3) : origine, producteur, contexte de création. "
         "2 à 4 phrases.\n"
-        "PORTEE: portée et contenu (ISAD 3.3.1) : de quoi traite CE document, points saillants relevés "
-        "dans son texte. 3 à 6 phrases.\n"
+        "PORTEE: portée et contenu (ISAD 3.3.1) : de quoi traite CE document. C'est le champ le plus "
+        "important de la fiche — développe-le autant que le document le justifie, sans le résumer à "
+        "l'excès. Décris les parties et rubriques, les thèmes traités, les types de pièces qu'il "
+        "contient, les points saillants relevés dans son texte. Un document riche mérite plusieurs "
+        "paragraphes, séparés par une ligne vide ; pour un document mince, quelques phrases suffisent. "
+        "N'abrège pas pour faire court.\n"
         "SUJETS: mots-clés thématiques, séparés par des virgules — tirés du contenu du document.\n"
         "LIEUX: noms de lieux, séparés par des virgules. N'indique QUE des noms LITTÉRALEMENT présents "
         "dans le texte du document : ne complète jamais par des communes plausibles ou connues par "
@@ -1241,14 +1249,20 @@ def _isad_parse(body: str) -> dict:
     """Découpe la réponse du modèle en champs. Tolérant : « DATE: » comme « DATE : », casse variable,
     et texte débordant sur plusieurs lignes (rattaché au champ courant)."""
     keys = {f[0] for f in ISAD_FIELDS}
-    fields, current = {}, None
+    fields, current, blank = {}, None, False
     for line in body.splitlines():
         m = re.match(r"^\s*([A-ZÀ-Ü]+)\s*:\s*(.*)$", line.strip())
         if m and m.group(1).upper() in keys:
             current = m.group(1).upper()
             fields[current] = m.group(2).strip()
-        elif current and line.strip():
-            fields[current] = (fields[current] + " " + line.strip()).strip()
+            blank = False
+        elif current and not line.strip():
+            # Ligne vide DANS un champ : changement de paragraphe. Tout était auparavant recollé par
+            # une espace, si bien qu'une portée en plusieurs paragraphes revenait en un seul bloc.
+            blank = True
+        elif current:
+            fields[current] = (fields[current] + ("\n" if blank else " ") + line.strip()).strip()
+            blank = False
     return fields
 
 
