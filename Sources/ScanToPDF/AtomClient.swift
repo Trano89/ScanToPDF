@@ -612,19 +612,28 @@ enum AtomClient {
             return .failure(.rejected("AtoM a refusé le PDF" + (why.map { " : " + plain($0) } ?? "")))
         }
         // AtoM ne redirige vers la notice QUE si le formulaire a été validé et l'objet enregistré
-        // (addDigitalObjectAction : isValid → processForm → save → redirect). On relit tout de même
-        // la notice pour confirmer. L'affichage d'un objet numérique dépendant du thème, l'absence
-        // d'indice est signalée comme un doute à lever, non comme un échec : ce serait mentir dans
-        // l'autre sens que de déclarer perdu un fichier qu'AtoM a bel et bien enregistré.
-        let marks = ["uploads/r/", "digital-object", "digitalObject", "/digitalobject/"]
-        if let after = await get(base.appendingPathComponent("index.php/" + slug)) {
-            if marks.contains(where: after.contains) {
-                log("✅ PDF attaché et vérifié sur /\(slug)")
-            } else {
-                log("PDF accepté par AtoM (redirection vers la notice) mais aucun objet numérique "
-                    + "visible à la relecture — à contrôler sur la notice")
-            }
+        // (addDigitalObjectAction : isValid → processForm → save → redirect). On relit tout de même,
+        // et on cherche NOTRE fichier : la notice publie l'objet numérique sous
+        // /uploads/r/<dépôt>/<a>/<b>/<c>/<empreinte>/<nom du fichier>. Vérifier ce lien prouve que
+        // c'est bien ce PDF-ci qui est attaché, et pas seulement qu'un objet quelconque existe.
+        guard let after = await get(base.appendingPathComponent("index.php/" + slug)) else {
+            log("PDF envoyé et accepté, mais notice illisible pour le confirmer")
+            return .success(())
         }
+        let name = pdf.lastPathComponent
+        if let link = firstMatch(after, "(https?://[^\"]*/uploads/r/[^\"]*"
+                                      + NSRegularExpression.escapedPattern(for: name) + ")") {
+            log("✅ PDF attaché et vérifié sur /\(slug) → \(link)")
+            return .success(())
+        }
+        if after.contains("/uploads/r/") {
+            // Un objet numérique est publié, mais sous un autre nom : AtoM a pu le renommer, ou
+            // c'en est un autre. On ne crie pas victoire sur la foi d'un simple indice.
+            log("un objet numérique est publié sur /\(slug) mais « \(name) » n'y figure pas — à contrôler")
+            return .success(())
+        }
+        log("PDF accepté par AtoM (redirection vers la notice) mais aucun objet numérique visible "
+            + "à la relecture — à contrôler sur la notice")
         return .success(())
     }
 
