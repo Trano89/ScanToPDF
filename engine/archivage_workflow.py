@@ -1119,7 +1119,9 @@ def _isad_prompt(ocr_text: str, project_name: str, fallback_date: str = "",
     if fallback_date:
         lines.append(f"- Date de création du fichier d'origine : {fallback_date}")
     facts_block = ("DONNÉES FACTUELLES (mesurées sur le fichier — reprends-les telles quelles, "
-                   "ne les contredis pas) :\n" + "\n".join(lines) + "\n\n")
+                   "ne les contredis pas) :\n" + "\n".join(lines) + "\n"
+                   "ATTENTION : la cote est une RÉFÉRENCE DE CLASSEMENT. L'année qu'elle contient est "
+                   "celle du versement, PAS celle du document — ne l'utilise JAMAIS comme date.\n\n")
     # Date de repli : proposée au modèle SEULEMENT si le document lui-même n'en porte aucune.
     date_fallback = (
         f"Si le TEXTE OCR ne porte AUCUNE date, et seulement dans ce cas, utilise la date de création "
@@ -1414,36 +1416,43 @@ def _isad_refine_date(valeur: str, ocr_text: str, logger: logging.Logger) -> str
     date fausse dans une notice d'archives est pire qu'une date absente.
     """
     v = (valeur or "").strip()
-    if re.match(r"^\d{4}-\d{2}-\d{2}", v) or re.match(r"^\d{4}-\d{2}$", v):
-        return v                                   # déjà précis, on n'y touche pas
+    if re.match(r"^\d{4}-\d{2}(-\d{2})?\s*[-–—]", v) or re.match(r"^\d{4}-\d{2}(-\d{2})?$", v):
+        return v                                   # déjà précis (date ou plage), on n'y touche pas
     releve = _isad_scan_dates(ocr_text)
     if not releve:
         return v
     annee = re.match(r"^(\d{4})$", v)
     if annee:
         a = annee.group(1)
-        # Affiner AAAA → AAAA-MM seulement si le texte ne propose qu'UN mois pour cette année.
-        mois = {iso[:7] for prec, iso, _ in releve if prec >= 2 and iso.startswith(a)}
-        if len(mois) == 1:
-            precise = _isad_plus_precise(releve, mois.pop())
-            logger.info(f"Fiche ISAD : date « {v} » précisée en « {precise} » d'après le texte.")
+        mois = sorted({iso[:7] for prec, iso, _ in releve if prec >= 2 and iso.startswith(a)})
+        if mois:
+            precise = _isad_intervalle(releve, mois)
+            if precise != v:
+                logger.info(f"Fiche ISAD : date « {v} » précisée en « {precise} » d'après le texte.")
             return precise
-        if len(mois) > 1:
-            logger.info(f"Fiche ISAD : {len(mois)} mois différents pour {a} dans le texte — "
-                        f"année conservée sans précision.")
         return v
     if v.lower().startswith("inconnu") or not v:
-        # Rien du modèle : n'accepter que si le texte désigne UN SEUL mois. « le 12 mars 1989 » est
-        # relevé deux fois — au jour et au mois — ce qui n'est pas une concurrence mais la même date
-        # à deux précisions : c'est le mois qui fait foi pour juger de l'ambiguïté.
-        mois = {iso[:7] for prec, iso, _ in releve if prec >= 2}
-        if len(mois) == 1:
-            trouve = _isad_plus_precise(releve, mois.pop())
-            logger.info(f"Fiche ISAD : aucune date du modèle — « {trouve} » relevée dans le texte.")
+        # Plusieurs mois ne sont PAS une impasse : un document qui court de décembre 2003 à janvier
+        # 2004 a une période, et ISAD sait l'exprimer. Rendre « Inconnu » ici livrait la date aux
+        # métadonnées du PDF — c'est-à-dire à la date de NUMÉRISATION, systématiquement fausse.
+        mois = sorted({iso[:7] for prec, iso, _ in releve if prec >= 2})
+        if mois:
+            trouve = _isad_intervalle(releve, mois)
+            logger.info(f"Fiche ISAD : aucune date du modèle — « {trouve} » relevée dans le texte "
+                        f"({len(mois)} mois distinct(s)).")
             return trouve
-        logger.info(f"Fiche ISAD : aucune date du modèle et {len(mois)} mois différents dans le "
-                    f"texte — laissée « Inconnu » plutôt que de choisir au hasard.")
+        logger.info("Fiche ISAD : aucune date ni dans la réponse du modèle ni dans le texte.")
     return v
+
+
+def _isad_intervalle(releve: list, mois: list) -> str:
+    """Un seul mois → la date la plus précise. Plusieurs → la PLAGE du plus ancien au plus récent,
+    conforme à ISAD 3.1.3. Les deux bornes sont littéralement dans le texte : rien n'est inventé."""
+    if len(mois) == 1:
+        return _isad_plus_precise(releve, mois[0])
+    debut = _isad_plus_precise(releve, mois[0])
+    fin = _isad_plus_precise(releve, mois[-1])
+    return f"{debut} - {fin}"
 
 
 def _isad_plus_precise(releve: list, mois: str) -> str:
@@ -1530,9 +1539,15 @@ def write_isad_sidecar(final_pdf: Path, ocr_text: str, project_name: str, logger
     if fields.get("DATE") is not None:
         fields["DATE"] = _isad_refine_date(fields.get("DATE", ""), ocr_text, logger)
     if fallback_date and fields.get("DATE", "").strip().lower().startswith("inconnu"):
+        # DERNIER recours : cette date est celle de FABRICATION du fichier — souvent celle de la
+        # numérisation, donc sans rapport avec le document. Elle n'intervient qu'une fois le texte
+        # épuisé, et la fiche le signale pour que la relecture ne s'y fie pas aveuglément.
         fields["DATE"] = fallback_date
-        date_note = "Date reprise des métadonnées du PDF d'origine (aucune date dans le texte).\n"
-        logger.info(f"Fiche ISAD : date absente du texte — reprise des métadonnées ({fallback_date}).")
+        date_note = ("Date reprise des métadonnées du PDF d'origine — le texte n'en porte aucune. "
+                     "C'est la date de fabrication du fichier, souvent celle de la numérisation : "
+                     "À VÉRIFIER.\n")
+        logger.warning(f"Fiche ISAD : aucune date dans le texte — repli sur les métadonnées du "
+                       f"fichier ({fallback_date}), qui peuvent être la date de numérisation.")
     # Filet de sécurité déterministe contre les lieux inventés (cf. _isad_filter_places).
     if fields.get("LIEUX"):
         fields["LIEUX"] = _isad_filter_places(fields["LIEUX"], ocr_text, logger)
