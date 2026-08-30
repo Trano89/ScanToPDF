@@ -21,6 +21,10 @@ struct AtomPublication: Identifiable {
     /// La notice utilise l'ancienne écriture « / » : sa cote sera migrée vers « _ ».
     var needsCodeMigration: Bool { matchedCode.contains("/") }
     var changedCount: Int { fields.filter { $0.kind != .unchanged }.count }
+    /// Dépôt retenu — celui affiché dans la fenêtre, donc modifiable avant l'envoi.
+    var repository: String {
+        fields.first { $0.key == "repository" }?.proposed ?? existing.repository
+    }
 
     /// Les seules valeurs à envoyer : celles réellement modifiées. L'import CSV accepte les
     /// mots-clés sous forme de texte — AtoM résout lui-même les termes — là où le formulaire

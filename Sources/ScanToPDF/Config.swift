@@ -109,6 +109,10 @@ struct AppConfig: Codable, Equatable {
     var atomEnabled: Bool = false
     var atomBaseURL: String = "https://archives.fvjc.ch"
     var atomEmail: String = ""
+    // Dépôt d'archives : c'est sur lui, avec la cote propre et le titre, que l'import CSV apparie la
+    // notice — et il est aussi écrit dans la notice. Modifiable, car une autre instance AtoM ou un
+    // second dépôt demanderaient une autre valeur.
+    var atomRepository: String = "Archives FVJC"
     // Application :
     var startAtLogin: Bool = true    // démarrer avec le système (login item)
     var networkEnabled: Bool = true  // découverte réseau + invitation de mise à jour
@@ -166,6 +170,7 @@ struct AppConfig: Codable, Equatable {
         atomEnabled = d(.atomEnabled, atomEnabled)
         atomBaseURL = d(.atomBaseURL, atomBaseURL)
         atomEmail = d(.atomEmail, atomEmail)
+        atomRepository = d(.atomRepository, atomRepository)
         exportEnabled = d(.exportEnabled, exportEnabled)
         nasVolumePath = d(.nasVolumePath, nasVolumePath)
         nasMountFrom = d(.nasMountFrom, nasMountFrom)

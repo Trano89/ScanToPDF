@@ -201,14 +201,24 @@ enum AtomClient {
 
     /// Compare la notice en ligne (éventuellement absente) avec ce que ScanToPDF propose.
     /// TOUTES les valeurs restent modifiables avant validation, y compris celles déjà dans AtoM.
-    static func diff(existing: AtomRecord?, proposed: AtomRecord) -> [AtomFieldDiff] {
+    static func diff(existing: AtomRecord?, proposed: AtomRecord,
+                     repository: String = "") -> [AtomFieldDiff] {
         let e = existing ?? AtomRecord()
         let j = { (a: [String]) in a.joined(separator: ", ") }
+        // Le dépôt vient des préférences ; il sert à retrouver la notice ET il y est écrit.
+        let depot = repository.isEmpty ? e.repository : repository
+        // La date n'est proposée QUE si la notice n'en porte aucune : AtoM ajoute les dates au lieu
+        // de les remplacer, republier écraserait donc moins qu'il n'empilerait.
+        let date = e.date.isEmpty ? proposed.date : e.date
         return [
             AtomFieldDiff(key: "identifier",          label: "Cote",                          multiline: false,
                           existing: e.identifier,      proposed: proposed.identifier),
             AtomFieldDiff(key: "title",               label: "Titre",                         multiline: false,
                           existing: e.title,           proposed: proposed.title.isEmpty ? e.title : proposed.title),
+            AtomFieldDiff(key: "repository",          label: "Dépôt",                         multiline: false,
+                          existing: e.repository,      proposed: depot),
+            AtomFieldDiff(key: "eventDates",          label: "Date(s)",                       multiline: false,
+                          existing: e.date,            proposed: date),
             AtomFieldDiff(key: "extentAndMedium",     label: "Étendue matérielle et support", multiline: true,
                           existing: e.extentAndMedium, proposed: proposed.extentAndMedium),
             AtomFieldDiff(key: "archivalHistory",     label: "Histoire archivistique",        multiline: true,
@@ -421,8 +431,32 @@ enum AtomClient {
         "subjectAccessPoints", "placeAccessPoints", "nameAccessPoints", "genreAccessPoints",
         "descriptionIdentifier", "institutionIdentifier", "rules", "descriptionStatus",
         "levelOfDetail", "revisionHistory", "languageOfDescription", "scriptOfDescription",
-        "sources", "archivistNote", "publicationStatus", "culture",
+        "sources", "archivistNote", "publicationStatus",
+        // Colonnes de date. AtoM les traite comme des ÉVÉNEMENTS : à la mise à jour il en AJOUTE un
+        // au lieu de remplacer l'existant (documenté, et confirmé par hasDuplicateEvent dans
+        // QubitFlatfileImport). D'où la règle : on ne publie une date que si la notice n'en porte
+        // aucune — sinon on accumulerait les dates à chaque republication.
+        "eventDates", "eventTypes", "eventStartDates", "eventEndDates",
+        "culture",
     ]
+
+    /// Dates internes d'AtoM : ISO 8601 (AAAA, AAAA-MM ou AAAA-MM-JJ). Une date libre (« vers 1950 »,
+    /// « s.d. ») reste affichable mais ne donne aucun intervalle — on n'en invente pas.
+    static func isoRange(_ display: String) -> (start: String, end: String) {
+        // Le groupe capturant doit couvrir TOUTE la date : firstMatch rend le premier groupe, et
+        // capturer la seule partie optionnelle faisait échouer « 2015 » — une année sans mois.
+        let iso = "^(\\d{4}(?:-\\d{2}(?:-\\d{2})?)?)$"
+        let t = display.trimmingCharacters(in: .whitespaces)
+        // Plage « AAAA - AAAA » : on ne coupe que sur un tiret ENTOURÉ d'espaces, sinon
+        // « 2015-02-13 » se scinderait sur ses propres séparateurs.
+        if let sep = t.range(of: "\\s+[-–—]\\s+", options: .regularExpression) {
+            let a = String(t[t.startIndex..<sep.lowerBound]).trimmingCharacters(in: .whitespaces)
+            let b = String(t[sep.upperBound...]).trimmingCharacters(in: .whitespaces)
+            let ok = firstMatch(a, iso) != nil && firstMatch(b, iso) != nil
+            return ok ? (a, b) : ("", "")
+        }
+        return firstMatch(t, iso) != nil ? (t, t) : ("", "")
+    }
 
     private static func csvCell(_ v: String) -> String {
         let flat = v.replacingOccurrences(of: "\r\n", with: "\n")
@@ -528,6 +562,7 @@ enum AtomClient {
 
     /// Publie une notice par import CSV, puis VÉRIFIE par relecture que la notice a bien changé.
     static func publishViaCsv(base: URL, slug: String, record: AtomRecord, pdf: URL,
+                              repository: String,
                               changes: [String: String]) async -> Result<Void, AtomError> {
         // La « Cote » affichée par AtoM est la cote de RÉFÉRENCE : pays, dépôt et cotes des parents
         // assemblés (« CH FVJC Zz.z.Z1.2026_1 »). L'appariement de l'import porte sur la cote PROPRE
@@ -545,7 +580,20 @@ enum AtomClient {
         for (k, v) in changes where k != "identifier" { values[k] = v }
         values["identifier"] = ownIdentifier
         values["title"] = ownTitle
-        values["repository"] = record.repository
+        // Le dépôt sert à RETROUVER la notice autant qu'il y est écrit : il doit donc toujours
+        // figurer, même inchangé, sans quoi l'appariement échoue.
+        values["repository"] = repository.isEmpty ? record.repository : repository
+        // Une date n'est publiée que si la notice n'en portait aucune (elle ne figure alors dans
+        // « changes » que dans ce cas). AtoM la range comme un ÉVÉNEMENT de type « Creation » ;
+        // les bornes internes ne sont posées que si la date est vraiment en ISO 8601.
+        if let d = values["eventDates"], !d.isEmpty {
+            values["eventTypes"] = "Creation"
+            let r = isoRange(d)
+            values["eventStartDates"] = r.start
+            values["eventEndDates"] = r.end
+            log("date publiée : « \(d) »" + (r.start.isEmpty
+                ? " (texte libre — aucune borne interne)" : " → \(r.start) … \(r.end)"))
+        }
         log("import CSV : cote propre « \(ownIdentifier) » (référence « \(record.identifier) »), "
             + "titre « \(ownTitle) », dépôt « \(record.repository)»"
             + (record.repository.isEmpty ? " — dépôt absent, appariement sur cote + titre" : ""))

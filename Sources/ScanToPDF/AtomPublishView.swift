@@ -90,6 +90,11 @@ struct AtomPublishView: View {
                     .font(.caption).foregroundStyle(.secondary)
                     .textSelection(.enabled).lineLimit(4)
             }
+            if f.wrappedValue.key == "eventDates" && !f.wrappedValue.existing.isEmpty {
+                Text("AtoM ajoute les dates au lieu de les remplacer : celle déjà en place est conservée. "
+                     + "La modifier ici en créerait une seconde.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
             if f.wrappedValue.multiline {
                 TextEditor(text: f.proposed)
                     .font(.system(size: 12)).frame(height: 90)

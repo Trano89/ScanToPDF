@@ -324,6 +324,11 @@ struct SettingsView: View {
                         .textFieldStyle(.roundedBorder)
                     TextField("Courriel du compte AtoM", text: b(\.atomEmail))
                         .textFieldStyle(.roundedBorder)
+                    TextField("Dépôt d'archives", text: b(\.atomRepository))
+                        .textFieldStyle(.roundedBorder)
+                    Text("Sert à retrouver la notice dans AtoM — l'appariement porte sur la cote, "
+                         + "le titre ET le dépôt. Reste modifiable au moment de publier.")
+                        .font(.caption).foregroundStyle(.secondary)
                     HStack {
                         SecureField("Mot de passe (facultatif)", text: $atomPassword)
                             .textFieldStyle(.roundedBorder)

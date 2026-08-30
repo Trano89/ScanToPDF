@@ -234,8 +234,9 @@ ISAD_TIMEOUT     = 900      # secondes d'attente max (inclut le chargement à fr
 # Plafond de la réponse. À 1500, les huit champs se disputaient le budget et la PORTÉE — le champ
 # qui porte la description réelle — était la première rabotée. Valeur volontairement large : elle
 # borne les dérives sans brider un document riche, et reste très en deçà de la fenêtre de contexte.
-# Ce n'est PAS un dimensionnement tiré d'un échantillon de documents.
-ISAD_MAX_TOKENS  = 4000
+# Ce n'est PAS un dimensionnement tiré d'un échantillon de documents : c'est un garde-fou haut, que
+# seuls les documents les plus fournis approcheront.
+ISAD_MAX_TOKENS  = 8000
 ISAD_START_WAIT  = 45       # secondes laissées à Ollama pour répondre après un démarrage automatique
 ISAD_MIN_TEXT    = 400      # en deçà, l'OCR n'a rien rendu d'exploitable → la fiche est signalée comme fragile
 
@@ -1155,7 +1156,9 @@ def _isad_prompt(ocr_text: str, project_name: str, fallback_date: str = "",
         "l'excès. Décris les parties et rubriques, les thèmes traités, les types de pièces qu'il "
         "contient, les points saillants relevés dans son texte. Un document riche mérite plusieurs "
         "paragraphes, séparés par une ligne vide ; pour un document mince, quelques phrases suffisent. "
-        "N'abrège pas pour faire court.\n"
+        "PROPORTIONNE la description à l'ampleur du document : un dossier de plusieurs dizaines de "
+        "pages demande une description longue et structurée, partie par partie, qui permette de savoir "
+        "ce qu'il contient sans l'ouvrir. N'abrège pas pour faire court.\n"
         "SUJETS: mots-clés thématiques, séparés par des virgules — tirés du contenu du document.\n"
         "LIEUX: noms de lieux, séparés par des virgules. N'indique QUE des noms LITTÉRALEMENT présents "
         "dans le texte du document : ne complète jamais par des communes plausibles ou connues par "

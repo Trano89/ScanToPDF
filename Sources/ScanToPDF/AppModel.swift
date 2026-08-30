@@ -378,6 +378,7 @@ final class AppModel: ObservableObject {
         let folder = pdf.deletingLastPathComponent()
         let code = pdf.deletingPathExtension().lastPathComponent
         guard let base = URL(string: config.atomBaseURL) else { return }
+        let repository = config.atomRepository.trimmingCharacters(in: .whitespaces)
         AtomClient.log("recherche de la notice « \(code) »…")
         atomStatus = "Recherche de la notice « \(code) » dans AtoM…"
         Task { [weak self] in
@@ -393,7 +394,8 @@ final class AppModel: ObservableObject {
             var p = AtomPublication(code: code, folder: folder, pdf: pdf,
                                     proposed: proposed, existing: match?.record ?? AtomRecord(),
                                     slug: match?.slug, matchedCode: match?.matchedCode ?? code)
-            p.fields = AtomClient.diff(existing: match?.record, proposed: proposed)
+            p.fields = AtomClient.diff(existing: match?.record, proposed: proposed,
+                                       repository: repository)
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 self.atomStatus = match == nil ? "Nouvelle notice à créer." : "Notice existante trouvée."
@@ -438,7 +440,8 @@ final class AppModel: ObservableObject {
         }
         AtomClient.log("publication de « \(p.code) » vers /\(slug) — champs : \(p.changes.keys.sorted().joined(separator: ", "))")
         switch await AtomClient.publishViaCsv(base: base, slug: slug, record: p.existing,
-                                              pdf: p.pdf, changes: p.changes) {
+                                              pdf: p.pdf, repository: p.repository,
+                                              changes: p.changes) {
         case .success:
             AtomClient.log("✅ « \(p.code) » publié et vérifié")
             return .success(())
