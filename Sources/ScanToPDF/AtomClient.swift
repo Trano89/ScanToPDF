@@ -274,8 +274,17 @@ enum AtomClient {
             if current != nil { buffer.append(raw) }
         }
         flush()
+        // La fiche .txt est repliée à largeur fixe pour être lisible d'un coup d'œil. Ces retours à
+        // la ligne sont un artifice de MISE EN PAGE, pas du contenu : publiés tels quels dans AtoM,
+        // ils coupaient les phrases en plein milieu. On rend donc au texte son flux, en ne gardant
+        // que les vrais changements de paragraphe — marqués par une ligne vide.
         func sectionText(_ key: String) -> String {
-            (sections[key] ?? []).joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+            (sections[key] ?? [])
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .split(whereSeparator: { $0.isEmpty })
+                .map { $0.joined(separator: " ") }
+                .joined(separator: "\n\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
         }
         func sectionList(_ key: String) -> [String] {
             (sections[key] ?? []).compactMap { l in

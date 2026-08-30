@@ -1310,8 +1310,14 @@ def _isad_render(fields: dict, raw: str) -> str:
                 out.extend(textwrap.wrap(item, wrap_w - 2,
                                          initial_indent="• ", subsequent_indent="  ") or ["• " + item])
         else:
-            # Une ligne vide entre les paragraphes du modèle, sinon repli simple à la bonne largeur.
-            for para in [p.strip() for p in value.split("\n") if p.strip()] or [value]:
+            # Les paragraphes se suivaient sans ligne vide : rien ne distinguait alors un repli de
+            # mise en page d'un vrai changement de paragraphe, et l'application ne pouvait pas rendre
+            # au texte son flux avant de le publier. La ligne vide est cette marque — elle aère aussi
+            # la fiche à la lecture.
+            paras = [p.strip() for p in value.split("\n") if p.strip()] or [value]
+            for n, para in enumerate(paras):
+                if n:
+                    out.append("")
                 out.extend(textwrap.wrap(para, wrap_w) or [para])
         out.append("")
     if not fields:      # réponse inattendue : on conserve le texte brut plutôt que de le perdre
