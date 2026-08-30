@@ -579,7 +579,18 @@ enum AtomClient {
         var values: [String: String] = ["culture": "fr"]
         for (k, v) in changes where k != "identifier" { values[k] = v }
         values["identifier"] = ownIdentifier
+        // Le TITRE est une clé d'appariement autant qu'une valeur : AtoM retrouve la notice sur
+        // cote + titre + dépôt. En envoyer un nouveau, c'est chercher une notice qui n'existe pas —
+        // la ligne serait ignorée et RIEN ne serait publié. Le premier envoi porte donc toujours le
+        // titre EN LIGNE ; le renommage, s'il y en a un, fait l'objet d'un second envoi (plus bas).
+        let renameTo = changes["title"].map { $0.trimmingCharacters(in: .whitespaces) }
+                                       .flatMap { $0 == ownTitle || $0.isEmpty ? nil : $0 }
         values["title"] = ownTitle
+        // Clé STABLE pour les mises à jour suivantes : chaque import enregistre une correspondance
+        // legacyId → notice (le « keymap » d'AtoM), consultée AVANT le titre. C'est elle qui rend le
+        // renommage possible, et c'est ce que réclamait l'avertissement du journal d'import :
+        // « Rows with empty legacyId column: 1. Future CSV updates may not match these records. »
+        values["legacyId"] = slug
         // Le dépôt sert à RETROUVER la notice autant qu'il y est écrit : il doit donc toujours
         // figurer, même inchangé, sans quoi l'appariement échoue.
         values["repository"] = repository.isEmpty ? record.repository : repository
@@ -607,6 +618,32 @@ enum AtomClient {
         }
         if case .failure(let e) = await verifySaved(base: base, slug: slug, changes: changes) {
             return .failure(e)
+        }
+        // Renommage : second envoi, apparié cette fois par la correspondance legacyId enregistrée à
+        // l'envoi précédent — le titre n'est donc plus une clé et peut changer. Le nom du fichier CSV
+        // fait partie de cette clé : il doit rester identique, d'où « <slug>.csv » à chaque fois.
+        if let newTitle = renameTo {
+            log("renommage demandé : « \(ownTitle) » → « \(newTitle) »")
+            var rename = values
+            rename["title"] = newTitle
+            switch await startImport(base: base, csv: buildCSV(rename), code: slug) {
+            case .failure(let e):
+                log("renommage : envoi refusé — \(e.localizedDescription)")
+            case .success(let job):
+                if case .failure(let e) = await awaitImport(base: base, job: job) {
+                    log("renommage : \(e.localizedDescription)")
+                }
+            }
+            // On ne devine pas : on relit le titre réellement enregistré.
+            let after = await get(base.appendingPathComponent("index.php/" + slug))
+                .map { parseRecord($0).title } ?? ""
+            if after == newTitle {
+                log("✅ titre renommé en « \(newTitle) »")
+            } else {
+                log("titre NON renommé (la notice porte toujours « \(after) ») — le reste est publié")
+                return .failure(.rejected("tout est publié SAUF le titre : AtoM retrouve la notice par "
+                    + "son titre, le renommage n'est possible qu'à la publication suivante"))
+            }
         }
         // Les données sont en ligne ; reste le PDF/A, seul fichier publié dans AtoM.
         return await attachPDF(base: base, slug: slug, pdf: pdf)
