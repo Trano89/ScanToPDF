@@ -313,8 +313,9 @@ enum AtomClient {
         r.subjects        = sectionList("MOTS-CL\u{c9}S \u{2014} SUJETS")
         r.places          = sectionList("MOTS-CL\u{c9}S \u{2014} LIEUX")
         r.names           = sectionList("POINTS D'ACC\u{c8}S MATI\u{c8}RES")
-        let genre         = sectionText("TYPE DOCUMENTAIRE")
-        r.genres          = genre.isEmpty || genre.caseInsensitiveCompare("Inconnu") == .orderedSame ? [] : [genre]
+        // Le type documentaire est désormais une LISTE (« brochure, portfolio ») : le lire comme un
+        // texte unique en aurait fait un seul terme bancal côté AtoM.
+        r.genres          = sectionList("TYPE DOCUMENTAIRE")
         return r
     }
 

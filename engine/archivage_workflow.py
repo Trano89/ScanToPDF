@@ -1165,13 +1165,20 @@ def _isad_prompt(ocr_text: str, project_name: str, fallback_date: str = "",
         "PROPORTIONNE la description à l'ampleur du document : un dossier de plusieurs dizaines de "
         "pages demande une description longue et structurée, partie par partie, qui permette de savoir "
         "ce qu'il contient sans l'ouvrir. N'abrège pas pour faire court.\n"
-        "SUJETS: mots-clés thématiques, séparés par des virgules — tirés du contenu du document.\n"
-        "LIEUX: noms de lieux, séparés par des virgules. N'indique QUE des noms LITTÉRALEMENT présents "
-        "dans le texte du document : ne complète jamais par des communes plausibles ou connues par "
-        "ailleurs. Aucun lieu dans le document → « Inconnu ».\n"
-        "GENRE: type documentaire (ex. brochure, procès-verbal, correspondance, photographie).\n"
-        "MATIERES: points d'accès matières / entités nommées (organisations, événements) citées dans "
-        "le document, séparées par des virgules.\n"
+        "SUJETS: AU PLUS QUATRE mots-clés thématiques, séparés par des virgules, du plus important au "
+        "moins important. Choisis ceux par lesquels un archiviste CHERCHERAIT ce document ; ce ne sont "
+        "pas des étiquettes à accumuler. Un terme qui conviendrait à n'importe quel document du fonds "
+        "n'apprend rien : écarte-le.\n"
+        "LIEUX: AU PLUS TROIS lieux, séparés par des virgules — celui de l'ORGANISATION qui produit le "
+        "document et, le cas échéant, celui où se déroule ce dont il traite. N'énumère PAS toutes les "
+        "communes citées au fil du texte : une liste de villages ne sert pas à retrouver la pièce. "
+        "N'indique QUE des noms LITTÉRALEMENT présents dans le texte du document : ne complète jamais "
+        "par des communes plausibles ou connues par ailleurs. Aucun lieu pertinent → « Inconnu ».\n"
+        "GENRE: AU PLUS QUATRE types documentaires, séparés par des virgules — la NATURE matérielle du "
+        "document (ex. brochure, portfolio, procès-verbal, correspondance, photographie), pas son sujet.\n"
+        "MATIERES: AU PLUS TROIS entités nommées, séparées par des virgules — organisations, "
+        "manifestations ou institutions dont le document traite VRAIMENT, non celles simplement "
+        "mentionnées en passant.\n"
     )
 
 
@@ -1249,7 +1256,14 @@ ISAD_FIELDS = (
     ("LIEUX",    "MOTS-CLÉS — LIEUX",       ""),
     ("MATIERES", "POINTS D'ACCÈS MATIÈRES", ""),
 )
-ISAD_LIST_FIELDS = {"SUJETS", "LIEUX", "MATIERES"}   # rendus en liste, un terme par ligne
+# Le GENRE devient une liste : c'est un type documentaire, souvent multiple (« brochure, portfolio »).
+ISAD_LIST_FIELDS = {"SUJETS", "LIEUX", "MATIERES", "GENRE"}   # rendus en liste, un terme par ligne
+# Un mot-clé n'a d'intérêt que s'il permet de RETROUVER le document. Une notice de 41 sujets et
+# 23 lieux ne se cherche plus, elle se subit : au-delà de quelques termes bien choisis, chaque ajout
+# dilue les précédents. Ces plafonds sont appliqués APRÈS le modèle, qui ne respecte pas
+# systématiquement une consigne de nombre.
+ISAD_MAX_TERMS = {"SUJETS": 4, "LIEUX": 3, "GENRE": 4, "MATIERES": 3}
+ISAD_MIN_TERM_LEN = 3      # « A », « 12 », « de » ne sont pas des mots-clés
 ISAD_WIDTH   = 78                                     # largeur de repli par défaut (lisible en Aperçu)
 ISAD_WIDE    = 120                                    # HISTOIRE et PORTEE : plusieurs phrases, éviter les retours prématurés
 
@@ -1273,6 +1287,38 @@ def _isad_parse(body: str) -> dict:
             fields[current] = (fields[current] + ("\n" if blank else " ") + line.strip()).strip()
             blank = False
     return fields
+
+
+def _isad_trim_terms(key: str, value: str, logger: logging.Logger) -> str:
+    """Ne garde que les termes exploitables, dans l'ordre donné par le modèle (le plus pertinent
+    d'abord), et plafonne leur nombre. Écarte les fragments d'OCR — lettre isolée, nombre nu,
+    ponctuation — qui n'ont aucune valeur de recherche."""
+    limit = ISAD_MAX_TERMS.get(key)
+    if not limit or not value or value.strip().lower().startswith("inconnu"):
+        return value
+    gardes, vus, ecartes = [], set(), []
+    for brut in re.split(r"[,;]", value):
+        t = brut.strip(" .;:-–—\t")
+        if not t:
+            continue
+        # Un terme utile a de la longueur ET au moins une lettre.
+        if len(t) < ISAD_MIN_TERM_LEN or not any(c.isalpha() for c in t):
+            ecartes.append(t)
+            continue
+        cle = t.lower()
+        if cle in vus:
+            continue
+        vus.add(cle)
+        gardes.append(t)
+    surplus = gardes[limit:]
+    gardes = gardes[:limit]
+    if ecartes:
+        logger.info(f"Fiche ISAD : {key} — {len(ecartes)} terme(s) sans valeur de recherche écarté(s) : "
+                    + ", ".join(ecartes[:6]))
+    if surplus:
+        logger.info(f"Fiche ISAD : {key} — {len(surplus)} terme(s) au-delà de {limit} écarté(s) : "
+                    + ", ".join(surplus[:6]))
+    return ", ".join(gardes) if gardes else "Inconnu"
 
 
 def _isad_filter_places(value: str, ocr_text: str, logger: logging.Logger) -> str:
@@ -1384,6 +1430,10 @@ def write_isad_sidecar(final_pdf: Path, ocr_text: str, project_name: str, logger
     # Filet de sécurité déterministe contre les lieux inventés (cf. _isad_filter_places).
     if fields.get("LIEUX"):
         fields["LIEUX"] = _isad_filter_places(fields["LIEUX"], ocr_text, logger)
+    # Puis pertinence et plafond, sur les quatre listes.
+    for cle in ISAD_MAX_TERMS:
+        if fields.get(cle):
+            fields[cle] = _isad_trim_terms(cle, fields[cle], logger)
     sidecar = final_pdf.with_suffix(".txt")
     # En-tête : provenance de la fiche (auto-générée, par quel modèle, et d'où vient la date).
     stamp = datetime.datetime.now().strftime("%Y-%m-%d à %H:%M")
