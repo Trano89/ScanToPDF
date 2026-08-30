@@ -1150,13 +1150,17 @@ def _isad_prompt(ocr_text: str, project_name: str, fallback_date: str = "",
         "- N'emploie un terme du contexte que s'il figure réellement dans le document.\n"
         "- Réponds UNIQUEMENT avec les champs ci-dessous, dans cet ordre exact, chacun sur sa ou ses "
         "lignes, sans commentaire ni Markdown.\n\n"
-        "DATE: date de création du document. Cherche-la PARTOUT : page de titre, en-tête, pied de page, "
-        "signature, mention d'achèvement, colophon — et en toutes lettres autant qu'en chiffres "
-        "(« février 2015 », « le 12 mars 1989 »). Écris AAAA-MM-JJ si le jour est connu, AAAA-MM si "
-        "seuls le mois et l'année le sont, AAAA si seule l'année l'est, ou une plage "
-        "« AAAA-MM-JJ - AAAA-MM-JJ » si le document couvre plusieurs dates. N'INVENTE JAMAIS une "
-        "composante absente : pas de jour pour un « février 2015 », pas de mois pour une simple année. "
-        "Aucune date dans le document → « Inconnu ».\n"
+        "DATE: date à laquelle CE document a été produit. Elle peut se trouver n'importe où — page de "
+        "titre, en-tête, pied de page, corps du texte, signature, colophon — et en toutes lettres "
+        "autant qu'en chiffres (« février 2015 », « le 12 mars 1989 », « 12.03.1989 »).\n"
+        "  Distingue la date de PRODUCTION des dates simplement CITÉES : « fait à Lausanne le 3 mai "
+        "1994 » ou « séance du 3 mai 1994 » datent le document ; « fondée en 1968 », « depuis 1950 », "
+        "« l'assemblée de 1987 » évoquent des faits ANTÉRIEURS et ne le datent pas.\n"
+        "  Si le document couvre une période (registre, relevé, compte rendu d'exercice), donne la "
+        "plage « AAAA-MM-JJ - AAAA-MM-JJ ». Sinon une seule date : AAAA-MM-JJ si le jour est connu, "
+        "AAAA-MM si seuls le mois et l'année le sont, AAAA si seule l'année l'est.\n"
+        "  N'INVENTE JAMAIS une composante absente : pas de jour pour un « février 2015 », pas de mois "
+        "pour une simple année. Aucune date dans le document → « Inconnu ».\n"
         + date_fallback +
         "ETENDUE: étendue et support (ISAD 3.1.5). Reprends OBLIGATOIREMENT le nombre de pages des "
         "DONNÉES FACTUELLES, sous la forme « <nature du document> de N pages », suivi du format "
@@ -1408,41 +1412,89 @@ def _isad_scan_dates(text: str) -> list:
     return vus
 
 
+# Ce qui, dans le texte, ANNONCE une date de création plutôt qu'une date citée en passant.
+# « Fait à Lausanne le 12 mars 1989 » désigne le document ; « fondée en 1968 » désigne un fait.
+ISAD_INDICES_DATE = (
+    r"fait\s+(?:a\s+\S+\s+)?le|etabli(?:e)?\s+(?:a\s+\S+\s+)?le|redige(?:e)?\s+le|"
+    r"signe(?:e)?\s+le|acheve(?:e)?\s+le|arrete(?:e)?\s+le|"
+    r"genere(?:e)?\s+le|edite(?:e)?\s+(?:le|en)|imprime(?:e)?\s+(?:le|en)|"
+    r"publie(?:e)?\s+(?:le|en)|paru(?:e)?\s+(?:le|en)|realise(?:e)?\s+(?:le|en)|"
+    r"date\s+(?:d'edition|du\s+document|d'etablissement)|"
+    r"seance\s+du|assemblee\s+(?:generale\s+)?du|reunion\s+du|proces-verbal\s+du|"
+    r",\s*le"                       # « Lausanne, le 12 mars 1989 »
+)
+
+
+def _isad_dates_marquees(texte_normalise: str, releve: list) -> list:
+    """Ne garde que les dates précédées d'un indice de création, dans les ~50 caractères qui les
+    précèdent. C'est le seul moyen de distinguer « fait le 12 mars 1989 » de « depuis 1989 »."""
+    marquees = []
+    for prec, iso, pos in releve:
+        avant = texte_normalise[max(0, pos - 50):pos]
+        if re.search(ISAD_INDICES_DATE + r"\s*$", avant) or re.search(ISAD_INDICES_DATE, avant):
+            marquees.append((prec, iso, pos))
+    return marquees
+
+
 def _isad_refine_date(valeur: str, ocr_text: str, logger: logging.Logger) -> str:
     """Complète la date du modèle par ce que le TEXTE porte réellement — et seulement par cela.
 
-    Prudence délibérée : on n'ajoute une précision que si le texte est SANS AMBIGUÏTÉ. Plusieurs mois
-    concurrents pour la même année, ou plusieurs dates isolées sans rapport, et l'on s'abstient : une
-    date fausse dans une notice d'archives est pire qu'une date absente.
+    Les dates se trouvent n'importe où dans un document : en-tête, corps, signature, ou citées au
+    fil du propos. Prendre la plus ancienne et la plus récente donnerait « 1968 - 2004 » pour un
+    procès-verbal qui rappelle la fondation de la fédération. On procède donc par ordre de fiabilité :
+
+    1. une date ANNONCÉE comme celle du document (« fait à Lausanne le… », « séance du… ») ;
+    2. à défaut, si toutes les dates tiennent dans une période courte, cette période — le document
+       couvre alors un intervalle, ce qu'ISAD sait exprimer ;
+    3. à défaut, la PLUS RÉCENTE : un document ne peut pas être antérieur à ce qu'il cite.
+
+    Aucune composante n'est jamais inventée.
     """
     v = (valeur or "").strip()
     if re.match(r"^\d{4}-\d{2}(-\d{2})?\s*[-–—]", v) or re.match(r"^\d{4}-\d{2}(-\d{2})?$", v):
         return v                                   # déjà précis (date ou plage), on n'y touche pas
     releve = _isad_scan_dates(ocr_text)
     if not releve:
+        if v.lower().startswith("inconnu") or not v:
+            logger.info("Fiche ISAD : aucune date ni dans la réponse du modèle ni dans le texte.")
         return v
+
     annee = re.match(r"^(\d{4})$", v)
-    if annee:
-        a = annee.group(1)
-        mois = sorted({iso[:7] for prec, iso, _ in releve if prec >= 2 and iso.startswith(a)})
-        if mois:
-            precise = _isad_intervalle(releve, mois)
-            if precise != v:
-                logger.info(f"Fiche ISAD : date « {v} » précisée en « {precise} » d'après le texte.")
-            return precise
+    if annee:                                      # le modèle tient une année : on reste dedans
+        releve = [d for d in releve if d[1].startswith(annee.group(1))]
+        if not releve:
+            return v
+    elif not (v.lower().startswith("inconnu") or not v):
+        return v                                   # réponse d'une autre forme : on n'y touche pas
+
+    marquees = _isad_dates_marquees(_sans_accents(ocr_text.lower()), releve)
+    if marquees:
+        # La plus précise ; à précision égale, la plus récente (une réédition porte deux mentions).
+        prec_max = max(d[0] for d in marquees)
+        retenue = max(d[1] for d in marquees if d[0] == prec_max)
+        logger.info(f"Fiche ISAD : date « {retenue} » annoncée comme celle du document dans le texte.")
+        return retenue
+
+    mois = sorted({iso[:7] for prec, iso, _ in releve if prec >= 2})
+    if not mois:
         return v
-    if v.lower().startswith("inconnu") or not v:
-        # Plusieurs mois ne sont PAS une impasse : un document qui court de décembre 2003 à janvier
-        # 2004 a une période, et ISAD sait l'exprimer. Rendre « Inconnu » ici livrait la date aux
-        # métadonnées du PDF — c'est-à-dire à la date de NUMÉRISATION, systématiquement fausse.
-        mois = sorted({iso[:7] for prec, iso, _ in releve if prec >= 2})
-        if mois:
-            trouve = _isad_intervalle(releve, mois)
-            logger.info(f"Fiche ISAD : aucune date du modèle — « {trouve} » relevée dans le texte "
-                        f"({len(mois)} mois distinct(s)).")
-            return trouve
-        logger.info("Fiche ISAD : aucune date ni dans la réponse du modèle ni dans le texte.")
-    return v
+    if _isad_amplitude_mois(mois[0], mois[-1]) <= 18:
+        retenue = _isad_intervalle(releve, mois)
+        logger.info(f"Fiche ISAD : aucune date annoncée — « {retenue} » d'après l'ensemble du texte "
+                    f"({len(mois)} mois distinct(s)).")
+        return retenue
+    retenue = _isad_plus_precise(releve, mois[-1])
+    logger.info(f"Fiche ISAD : dates étalées sur plus de 18 mois ({mois[0]} … {mois[-1]}) — la plus "
+                f"récente est retenue (« {retenue} »), les mentions antérieures étant citées et non "
+                f"produites par le document.")
+    return retenue
+
+
+def _isad_amplitude_mois(debut: str, fin: str) -> int:
+    """Nombre de mois entre deux « AAAA-MM »."""
+    a1, m1 = int(debut[:4]), int(debut[5:7])
+    a2, m2 = int(fin[:4]), int(fin[5:7])
+    return (a2 - a1) * 12 + (m2 - m1)
 
 
 def _isad_intervalle(releve: list, mois: list) -> str:
