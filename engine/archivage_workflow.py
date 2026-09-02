@@ -724,7 +724,14 @@ def run_ghostscript(src_pdf: Path, out_pdf: Path, pdfa: bool, downsample: bool, 
 # ─────────────────────────────────────────────────────────────
 # FINALISATION — vrai PDF/A-2b (Ghostscript + OutputIntent) ou compression / copie simple
 # ─────────────────────────────────────────────────────────────
-def finalize_pdf(src_pdf: Path, project_name: str, project_dir: Path, logger: logging.Logger) -> Path:
+def finalize_pdf(src_pdf: Path, project_name: str, project_dir: Path,
+                 logger: logging.Logger) -> tuple:
+    """Rend (chemin du PDF, liste de ce qui a été DEMANDÉ mais n'a pas pu être produit).
+
+    Le repli en copie brute évite de perdre le document quand Ghostscript échoue — mais il livre
+    alors un PDF sans filigrane et non certifié. Le taire et annoncer « SUCCÈS » reviendrait à
+    faire croire à un archivage conforme : la liste remonte donc jusqu'à la ligne finale.
+    """
     # Sortie VERSIONNÉE : on n'écrase jamais un PDF déjà archivé (anti-perte de données, #4).
     final = _unique_path(project_dir / f"{project_name}.pdf")
     wm = _watermark_ps()
@@ -733,7 +740,7 @@ def finalize_pdf(src_pdf: Path, project_name: str, project_dir: Path, logger: lo
         try:
             run_ghostscript(src_pdf, final, pdfa=True, downsample=OPT_COMPRESS, logger=logger, watermark_ps=wm)
             logger.info(f"PDF/A-2b final{' + filigrane' if wm else ''} : {final}")
-            return final
+            return final, []
         except Exception as exc:
             # On NE revendique PAS PDF/A si on n'a pas pu le produire (pas d'annonce trompeuse).
             logger.error(f"PDF/A non produit ({exc}) — repli sur PDF simple non certifié.")
@@ -743,13 +750,20 @@ def finalize_pdf(src_pdf: Path, project_name: str, project_dir: Path, logger: lo
         try:
             run_ghostscript(src_pdf, final, pdfa=False, downsample=OPT_COMPRESS, logger=logger, watermark_ps=wm)
             logger.info(f"PDF final{' compressé' if OPT_COMPRESS else ''}{' + filigrane' if wm else ''} : {final}")
-            return final
+            return final, (["PDF/A"] if OPT_PDFA else [])
         except Exception as exc:
             logger.error(f"Ghostscript échoué ({exc}) — copie brute.")
 
     shutil.copy(str(src_pdf), str(final))
     logger.info(f"PDF final : {final}")
-    return final
+    manques = []
+    if OPT_PDFA:
+        manques.append("PDF/A")
+    if wm:
+        manques.append("filigrane")
+    if OPT_COMPRESS:
+        manques.append("compression")
+    return final, manques
 
 
 # ─────────────────────────────────────────────────────────────
@@ -773,6 +787,11 @@ def cleanup_temp(logger: logging.Logger):
 # ─────────────────────────────────────────────────────────────
 # NOTIFICATION macOS
 # ─────────────────────────────────────────────────────────────
+def _sans_chemins(message: str) -> str:
+    """Remplace les chemins absolus par le seul nom de fichier, pour l'affichage à l'écran."""
+    return re.sub(r"(/[^\s'\"]+)+/([^/\s'\"]+)", r"\2", message)[:200]
+
+
 def send_notification(title: str, message: str, success: bool, logger: logging.Logger):
     if not OPT_NOTIFY:
         return
@@ -1663,7 +1682,7 @@ def process_project(project_name: str, source_files: list, logger: logging.Logge
         isad_date = _pdf_creation_date(pdfs[0], logger) if (OPT_ISAD and pdfs and not images) else ""
         staged = run_ocr(source, project_name, logger)
         # finalize_pdf gère en un seul passage Ghostscript : compression @ DPI et/ou vrai PDF/A-2b.
-        final_pdf = finalize_pdf(staged, project_name, project_dir, logger)
+        final_pdf, manques = finalize_pdf(staged, project_name, project_dir, logger)
 
         # Suppression optionnelle des ORIGINAUX (opt-in EXPLICITE, OFF par défaut → aucune perte par
         # défaut). Supprime uniquement les originaux isolés (TIFF *et* PDF, à l'identique), JAMAIS le résultat.
@@ -1687,8 +1706,17 @@ def process_project(project_name: str, source_files: list, logger: logging.Logge
             except Exception as exc:
                 logger.error(f"Fiche ISAD échouée (ignorée) : {exc}")
 
-        logger.info(f"✅ SUCCÈS : {project_name} → {final_pdf}")
-        send_notification(project_name, f"PDF généré : {final_pdf.name}", True, logger)
+        # La mention des manques précède la flèche : l'application lit le chemin APRÈS « → », le
+        # contrat qui déclenche la publication reste donc intact.
+        defaut = f" (SANS {', '.join(manques)})" if manques else ""
+        logger.info(f"✅ SUCCÈS{defaut} : {project_name} → {final_pdf}")
+        if manques:
+            logger.warning(f"Document produit mais INCOMPLET : {', '.join(manques)} — "
+                           f"Ghostscript a échoué, voir les lignes ci-dessus.")
+        send_notification(project_name,
+                          f"PDF généré : {final_pdf.name}"
+                          + (f" — SANS {', '.join(manques)}" if manques else ""),
+                          not manques, logger)
         # Export vers le NAS / Synology Drive — best-effort : n'échoue JAMAIS le traitement local.
         try:
             export_result(project_dir, project_name, logger)
@@ -1696,7 +1724,10 @@ def process_project(project_name: str, source_files: list, logger: logging.Logge
             logger.error(f"Export vers le NAS échoué : {exc}")
     except Exception as exc:
         logger.error(f"❌ ÉCHEC pour '{project_name}' : {exc}", exc_info=True)
-        send_notification(project_name, str(exc), False, logger)
+        # Le message d'exception porte souvent un CHEMIN ABSOLU (« /Users/…/Desktop/… ») : dans une
+        # notification affichée à l'écran, il n'apprend rien à l'utilisateur et expose l'arborescence.
+        # Le journal, lui, conserve le message entier pour le diagnostic.
+        send_notification(project_name, _sans_chemins(str(exc)), False, logger)
     finally:
         cleanup_temp(logger)
         if project_dir.exists():

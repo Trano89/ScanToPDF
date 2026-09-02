@@ -39,6 +39,21 @@ struct AppConfig: Codable, Equatable {
     var isadEnabled: Bool = false               // générer la fiche texte ISAD à côté du PDF
     var isadModel: String = "qwen3.5:9b"        // modèle Ollama interrogé (doit être « pull » au préalable)
     var isadHost: String = "http://localhost:11434"  // URL de base de l'API Ollama locale
+
+    /// Même règle que `_validate_isad_host` côté moteur : le texte INTÉGRAL du document part vers
+    /// cette adresse, elle doit donc rester sur la machine ou le réseau privé. Dupliquée ici pour
+    /// pouvoir prévenir dans les préférences plutôt que de laisser le moteur retomber en silence
+    /// sur localhost — l'utilisateur croyait alors sa saisie prise en compte.
+    static func isadHostAccepted(_ url: String) -> Bool {
+        guard let u = URL(string: url.trimmingCharacters(in: .whitespaces)),
+              let scheme = u.scheme?.lowercased(), scheme == "http" || scheme == "https",
+              let host = u.host?.lowercased(), !host.isEmpty else { return false }
+        if ["localhost", "127.0.0.1", "::1", "[::1]"].contains(host) { return true }
+        if host.hasPrefix("127.") || host.hasSuffix(".local") || host.hasSuffix(".lan") { return true }
+        let n = host.split(separator: ".").compactMap { Int($0) }
+        guard n.count == 4 else { return false }
+        return n[0] == 10 || (n[0] == 192 && n[1] == 168) || (n[0] == 172 && (16...31).contains(n[1]))
+    }
     // Contexte du fonds transmis au modèle, éditable dans les préférences. Sans lui le modèle invente
     // le sens des sigles (« FVJC » a déjà été développé en « Front des Veilleurs Juifs et Chrétiens »).
     // ⚠️ Ce texte par défaut doit rester identique à ISAD_CONTEXT_DEFAULT dans engine/archivage_workflow.py.

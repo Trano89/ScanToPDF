@@ -241,6 +241,16 @@ struct SettingsView: View {
                         }
                     }
                     TextField("Adresse Ollama", text: b(\.isadHost)).textFieldStyle(.roundedBorder)
+                    // Le moteur REFUSE une adresse non locale — le texte intégral du document y serait
+                    // envoyé — et retombe alors sur localhost SANS que rien ne l'indique ici. On le dit.
+                    if !AppConfig.isadHostAccepted(draft.isadHost) {
+                        Label("Adresse refusée : le texte intégral des documents y serait envoyé. "
+                              + "Seuls la machine locale, le réseau privé et les noms « .local » ou "
+                              + "« .lan » sont acceptés — le traitement utilisera localhost:11434.",
+                              systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption).foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     Text("Après chaque PDF, le texte OCR est résumé par un modèle local en champs ISAD(G). Si Ollama n'est pas démarré, ScanToPDF le lance. En cas d'échec, le PDF est produit normalement, sans fiche.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
