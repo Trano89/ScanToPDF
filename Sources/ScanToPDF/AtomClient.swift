@@ -339,6 +339,15 @@ enum AtomClient {
         guard let page = await get(loginURL) else { return false }
         let form = isolateForm(page, actionContains: "user/login") ?? page
         let token = inputValue(form, name: "_csrf_token") ?? ""
+        // Un jeton vide signifie que la page de connexion n'a pas été lue comme prévu (page d'erreur,
+        // portail captif, gabarit modifié). Poursuivre donnerait une session muette : les requêtes
+        // suivantes échouent sans que rien n'explique pourquoi. Le journal a montré un cas réel
+        // « connexion : OK (jeton 0 car.) » suivi d'échecs incompréhensibles.
+        guard !token.isEmpty else {
+            log("connexion « " + email + " » : ABANDON — aucun jeton dans la page de connexion "
+                + "(page inattendue ou service indisponible)")
+            return false
+        }
         let body = ["email": email, "password": password, "_csrf_token": token, "next": ""]
         guard let html = await post(loginURL, fields: body) else { log("connexion : aucune r\u{e9}ponse"); return false }
         let ok = html.contains("user/logout") || !html.contains("name=\"password\"")
@@ -486,6 +495,30 @@ enum AtomClient {
     }
 
     /// Envoie le CSV à l'import d'AtoM et rend l'identifiant du travail lancé.
+    /// Conserve la pièce à conviction d'un échec sous un nom horodaté. Sans cela, chaque nouvelle
+    /// tentative écrase la précédente : après huit essais, il ne restait qu'une trace — la dernière —
+    /// et rien ne permettait de comparer ce qui variait d'un envoi à l'autre.
+    private static func archiveEchec(_ code: String, csv: String?, reponse: String?) {
+        let dossier = URL(fileURLWithPath: "/Users/Shared/ScanToPDF/echecs")
+        try? FileManager.default.createDirectory(at: dossier, withIntermediateDirectories: true)
+        let f = DateFormatter()
+        f.dateFormat = "yyyyMMdd-HHmmss"
+        let base = f.string(from: Date()) + "-" + code
+        if let csv { try? csv.data(using: .utf8)?.write(to: dossier.appendingPathComponent(base + ".csv")) }
+        if let reponse { try? reponse.data(using: .utf8)?.write(to: dossier.appendingPathComponent(base + ".html")) }
+        // On garde les 40 fichiers les plus récents : de quoi comparer plusieurs essais sans laisser
+        // le dossier croître indéfiniment.
+        let tout = (try? FileManager.default.contentsOfDirectory(at: dossier,
+                    includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+        let tries = tout.sorted {
+            let a = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+            let b = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+            return a > b
+        }
+        for vieux in tries.dropFirst(40) { try? FileManager.default.removeItem(at: vieux) }
+        log("pièces conservées : echecs/" + base + ".csv et .html")
+    }
+
     private static func startImport(base: URL, csv: String, code: String) async -> Result<String, AtomError> {
         let formURL = URL(string: base.absoluteString + "/index.php/object/importSelect?type=csv")!
         guard let page = await get(formURL) else {
@@ -523,7 +556,20 @@ enum AtomClient {
                 return .failure(.rejected(plain(err)))
             }
             log("import : aucun travail lancé (HTTP \(status)) — réponse dans atom_reponse.html")
-            return .failure(.rejected("AtoM n'a pas lancé l'import (droits d'import manquants ?)"))
+            archiveEchec(code, csv: csv, reponse: body)
+            // Distinguer ce qui vient du serveur de ce qui vient du compte : annoncer « droits
+            // manquants » sur une erreur 500 envoie chercher au mauvais endroit.
+            if status >= 500 {
+                return .failure(.rejected("erreur interne du serveur AtoM (HTTP \(status)) : l'import "
+                    + "n'a pas démarré. La cause est dans le journal du serveur ; le fichier envoyé "
+                    + "est conservé dans atom_import.csv et peut être importé à la main pour comparer."))
+            }
+            if status == 403 || status == 401 {
+                return .failure(.rejected("AtoM a refusé l'import (HTTP \(status)) — le compte n'a "
+                    + "probablement pas le droit d'importer."))
+            }
+            return .failure(.rejected("AtoM n'a pas lancé l'import (HTTP \(status)) — voir "
+                + "atom_reponse.html"))
         }
         log("import CSV accepté — travail n° \(job)")
         return .success(job)
