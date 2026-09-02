@@ -121,11 +121,94 @@ enum AtomClient {
     /// Extrait les champs d'une page de notice. La mise en page d'AtoM est régulière :
     /// `<h3 …>Libellé</h3><div class="col-9 p-2">contenu</div>`, et les points d'accès sont
     /// regroupés dans des conteneurs `subjectAccessPoints`, `placeAccessPoints`, etc.
+
+    /// « 2023-11-05 (Création/Production) » → « 2023-11-05 ». Le type est une décoration d'affichage.
+    static func _sansTypeEvenement(_ v: String) -> String {
+        v.replacingOccurrences(of: "\\s*\\([^)]*\\)\\s*$", with: "", options: .regularExpression)
+         .trimmingCharacters(in: .whitespaces)
+    }
+
+    /// Une date publiable est une date ISO — « AAAA », « AAAA-MM », « AAAA-MM-JJ » — ou une période
+    /// faite de deux d'entre elles. Tout le reste (texte libre, mention de type, « vers 1950 ») est
+    /// refusé : mieux vaut ne rien écrire qu'inscrire dans le catalogue une date qui n'en est pas une.
+    static func dateISOValide(_ v: String) -> Bool {
+        let iso = "\\d{4}(-\\d{2}(-\\d{2})?)?"
+        let t = v.trimmingCharacters(in: .whitespaces)
+        return t.range(of: "^" + iso + "(\\s+-\\s+" + iso + ")?$", options: .regularExpression) != nil
+    }
+
+    // MARK: - vocabulaire des genres
+
+    /// Taxonomie « Genres » d'AtoM. L'identifiant 78 est une constante du logiciel
+    /// (QubitTaxonomy::GENRE_ID) ; la page a été vérifiée sur l'instance : elle s'intitule « Genres ».
+    private static let taxonomieGenres = 78
+    private static var genresCache: [String]?
+
+    /// Termes de genre DÉJÀ présents dans le catalogue. Sans cette liste, l'import crée un terme
+    /// jumeau au moindre écart de casse : le thésaurus porte déjà « Cahier-des-charges-2 »,
+    /// « Annonces-3 », « Calendrier-3 », nés exactement de cette façon.
+    static func genresExistants(base: URL) async -> [String] {
+        if let c = genresCache { return c }
+        var out: [String] = []
+        for page in 1...10 {
+            guard let u = URL(string: base.absoluteString
+                    + "/index.php/taxonomy/index/id/\(taxonomieGenres)"
+                    + "?page=\(page)&limit=100&sort=identifier&sortDir=asc"),
+                  let html = await get(u) else { break }
+            let lot = tousLesGroupes(html, "<a href=\"/index\\.php/[^\"/?]+\" title=\"([^\"]+)\"")
+            if lot.isEmpty { break }
+            out += lot.map { plain($0) }
+            if !html.contains("page=\(page + 1)&limit=100") { break }
+        }
+        let uniques = Array(Set(out.filter { !$0.isEmpty })).sorted()
+        genresCache = uniques
+        log("vocabulaire des genres : \(uniques.count) terme(s) lus dans AtoM")
+        return uniques
+    }
+
+    private static func tousLesGroupes(_ texte: String, _ motif: String) -> [String] {
+        guard let re = try? NSRegularExpression(pattern: motif, options: [.caseInsensitive]) else { return [] }
+        return re.matches(in: texte, range: NSRange(texte.startIndex..., in: texte)).compactMap {
+            Range($0.range(at: 1), in: texte).map { r in String(texte[r]) }
+        }
+    }
+
+    private static func pliage(_ s: String) -> String {
+        s.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "fr"))
+         .trimmingCharacters(in: .whitespaces)
+    }
+
+    /// Aligne les genres proposés sur le vocabulaire du catalogue : un terme reconnu est renvoyé
+    /// dans l'ORTHOGRAPHE d'AtoM, un terme inconnu est écarté plutôt que créé. La comparaison ignore
+    /// la casse et les accents — « cahier des charges » retrouve « Cahier des charges » — mais rien
+    /// de plus : « Affiche » et « Affiches » sont deux termes distincts du thésaurus, les confondre
+    /// serait choisir à la place de l'archiviste.
+    static func alignerGenres(_ proposes: [String], sur vocabulaire: [String]) -> (retenus: [String], ecartes: [String]) {
+        guard !vocabulaire.isEmpty else { return ([], proposes) }
+        var index: [String: String] = [:]
+        for t in vocabulaire { index[pliage(t)] = t }
+        var retenus: [String] = [], ecartes: [String] = []
+        for g in proposes {
+            let g = g.trimmingCharacters(in: .whitespaces)
+            guard !g.isEmpty else { continue }
+            if let exact = index[pliage(g)] {
+                if !retenus.contains(exact) { retenus.append(exact) }
+            } else {
+                ecartes.append(g)
+            }
+        }
+        return (retenus, ecartes)
+    }
+
     static func parseRecord(_ html: String) -> AtomRecord {
         var r = AtomRecord()
         r.identifier      = field(html, "Cote")
         r.title           = field(html, "Titre")
-        r.date            = field(html, "Date(s)")
+        // AtoM affiche la date suffixée de son type : « 2023 (Création/Production) ». Relue telle
+        // quelle puis renvoyée, cette mention s'incrustait dans la valeur — et comme elle faisait
+        // différer la date lue de la date proposée, l'envoi repartait et AtoM AJOUTAIT un événement
+        // de plus à chaque publication. On ne garde que la date.
+        r.date            = _sansTypeEvenement(field(html, "Date(s)"))
         r.extentAndMedium = field(html, "Étendue matérielle et support")
         r.archivalHistory = field(html, "Histoire archivistique")
         r.scopeAndContent = field(html, "Portée et contenu")
@@ -644,6 +727,13 @@ enum AtomClient {
         // Une date n'est publiée que si la notice n'en portait aucune (elle ne figure alors dans
         // « changes » que dans ce cas). AtoM la range comme un ÉVÉNEMENT de type « Creation » ;
         // les bornes internes ne sont posées que si la date est vraiment en ISO 8601.
+        if let d = values["eventDates"], !d.isEmpty, !dateISOValide(d) {
+            // Une date hors format irait s'inscrire telle quelle dans le catalogue, et AtoM
+            // l'AJOUTERAIT en plus de l'existante. On préfère ne rien écrire, et le dire.
+            log("date « \(d) » écartée : seules « AAAA-MM-JJ » ou « AAAA-MM-JJ - AAAA-MM-JJ » "
+                + "sont publiables")
+            values["eventDates"] = ""
+        }
         if let d = values["eventDates"], !d.isEmpty {
             values["eventTypes"] = "Creation"
             let r = isoRange(d)

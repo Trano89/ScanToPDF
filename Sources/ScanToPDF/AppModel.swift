@@ -414,6 +414,15 @@ final class AppModel: ObservableObject {
             let text = (try? String(contentsOf: fiche, encoding: .utf8)) ?? ""
             var proposed = AtomClient.recordFromFiche(text, code: code)
             let match = await AtomClient.findExisting(base: base, code: code)
+            // Les genres sont alignés sur le thésaurus du catalogue AVANT toute comparaison : ce que
+            // l'archiviste voit à l'écran est exactement ce qui partira, orthographe d'AtoM comprise.
+            let vocabulaire = await AtomClient.genresExistants(base: base)
+            let tri = AtomClient.alignerGenres(proposed.genres, sur: vocabulaire)
+            proposed.genres = tri.retenus
+            if !tri.ecartes.isEmpty {
+                AtomClient.log("genres écartés (absents du thésaurus, non créés) : "
+                               + tri.ecartes.joined(separator: ", "))
+            }
             // La cote proposée est TOUJOURS l'écriture « _ » : publier migre une ancienne notice.
             proposed.identifier = match.map { m in
                 let prefix = m.record.identifier.replacingOccurrences(of: m.matchedCode, with: "")
@@ -422,6 +431,7 @@ final class AppModel: ObservableObject {
             var p = AtomPublication(code: code, folder: folder, pdf: pdf,
                                     proposed: proposed, existing: match?.record ?? AtomRecord(),
                                     slug: match?.slug, matchedCode: match?.matchedCode ?? code)
+            p.genresEcartes = tri.ecartes
             p.fields = AtomClient.diff(existing: match?.record, proposed: proposed,
                                        repository: repository)
             await MainActor.run { [weak self] in

@@ -120,6 +120,11 @@ struct AtomPublishView: View {
                 }
                 .font(.callout)
             }
+            if f.wrappedValue.key == "genreAccessPoints" && !pub.genresEcartes.isEmpty {
+                calloutLabel("Écartés car absents du thésaurus d'AtoM — ils ne sont pas créés pour "
+                             + "éviter les doublons : " + pub.genresEcartes.joined(separator: ", "),
+                             icon: "questionmark.circle", tint: .orange)
+            }
             if f.wrappedValue.key == "eventDates" && !f.wrappedValue.existing.isEmpty {
                 calloutLabel("AtoM ajoute les dates au lieu de les remplacer : celle déjà en "
                              + "place est conservée. La modifier ici en créerait une seconde.",

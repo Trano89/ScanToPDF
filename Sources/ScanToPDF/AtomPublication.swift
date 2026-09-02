@@ -13,6 +13,9 @@ struct AtomPublication: Identifiable {
     var slug: String?                // notice existante ; nil = INTROUVABLE (aucune création possible)
     var matchedCode: String = ""     // écriture trouvée dans AtoM (« _ » ou « / »)
     var fields: [AtomFieldDiff] = []
+    /// Genres proposés par la fiche mais ABSENTS du thésaurus d'AtoM : ils ne sont pas envoyés, pour
+    /// ne pas créer de terme jumeau. Conservés ici afin de pouvoir les montrer à l'archiviste.
+    var genresEcartes: [String] = []
 
     var exists: Bool { slug != nil }
     /// Aucune notice trouvée : on ne crée jamais de notice depuis ScanToPDF — le catalogue reste
