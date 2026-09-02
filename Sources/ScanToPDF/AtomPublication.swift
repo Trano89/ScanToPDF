@@ -16,6 +16,9 @@ struct AtomPublication: Identifiable {
     /// Genres proposés par la fiche mais ABSENTS du thésaurus d'AtoM : ils ne sont pas envoyés, pour
     /// ne pas créer de terme jumeau. Conservés ici afin de pouvoir les montrer à l'archiviste.
     var genresEcartes: [String] = []
+    /// Vrai quand le thésaurus n'a pas pu être lu : les genres sont alors écartés par PRUDENCE,
+    /// non parce qu'ils manquent au catalogue. La nuance change ce que l'archiviste doit faire.
+    var thesaurusIllisible = false
 
     var exists: Bool { slug != nil }
     /// Aucune notice trouvée : on ne crée jamais de notice depuis ScanToPDF — le catalogue reste

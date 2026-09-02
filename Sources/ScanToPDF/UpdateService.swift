@@ -285,7 +285,11 @@ final class UpdateService {
                                 Self.ulog("serveur: trop de transferts simultanés — refus")
                             }
                         }
-                    } catch { }
+                    } catch {
+                        // Un service interrompu passait totalement sous silence : le pair voyait un
+                        // échec sans qu'aucune trace n'existe de ce côté.
+                        Self.ulog("serveur: transfert interrompu — \(error.localizedDescription)")
+                    }
                     conn.cancel()
                 }
             case .failed, .cancelled:

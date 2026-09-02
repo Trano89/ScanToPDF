@@ -133,8 +133,15 @@ enum AtomClient {
     /// refusé : mieux vaut ne rien écrire qu'inscrire dans le catalogue une date qui n'en est pas une.
     static func dateISOValide(_ v: String) -> Bool {
         let iso = "\\d{4}(-\\d{2}(-\\d{2})?)?"
-        let t = v.trimmingCharacters(in: .whitespaces)
+        let t = normaliseDate(v)
         return t.range(of: "^" + iso + "(\\s+-\\s+" + iso + ")?$", options: .regularExpression) != nil
+    }
+
+    /// Un tiret long saisi à la main (« – », « — ») désignait la même période qu'un trait d'union,
+    /// mais faisait échouer la validation et la date était écartée sans que la différence se voie.
+    static func normaliseDate(_ v: String) -> String {
+        v.replacingOccurrences(of: "\\s*[–—]\\s*", with: " - ", options: .regularExpression)
+         .trimmingCharacters(in: .whitespaces)
     }
 
     // MARK: - vocabulaire des genres
@@ -142,26 +149,39 @@ enum AtomClient {
     /// Taxonomie « Genres » d'AtoM. L'identifiant 78 est une constante du logiciel
     /// (QubitTaxonomy::GENRE_ID) ; la page a été vérifiée sur l'instance : elle s'intitule « Genres ».
     private static let taxonomieGenres = 78
-    private static var genresCache: [String]?
+    // Cache à durée limitée. Sans expiration, un terme ajouté dans AtoM — souvent parce que
+    // ScanToPDF venait de signaler qu'il manquait — restait invisible jusqu'au redémarrage de
+    // l'application : l'archiviste corrigeait le catalogue sans que rien ne change à l'écran.
+    private static var genresCache: (termes: [String], lu: Date)?
+    private static let genresCacheDuree: TimeInterval = 600
 
     /// Termes de genre DÉJÀ présents dans le catalogue. Sans cette liste, l'import crée un terme
     /// jumeau au moindre écart de casse : le thésaurus porte déjà « Cahier-des-charges-2 »,
     /// « Annonces-3 », « Calendrier-3 », nés exactement de cette façon.
-    static func genresExistants(base: URL) async -> [String] {
-        if let c = genresCache { return c }
+    /// Rend nil si le thésaurus n'a PAS pu être lu — à distinguer d'une taxonomie vide : dans un
+    /// cas on ignore le vocabulaire, dans l'autre on le connaît. Confondre les deux revenait à
+    /// présenter tous les genres comme « absents du thésaurus » sur un simple incident réseau.
+    static func genresExistants(base: URL) async -> [String]? {
+        if let c = genresCache, Date().timeIntervalSince(c.lu) < genresCacheDuree { return c.termes }
         var out: [String] = []
+        var luAuMoinsUnePage = false
         for page in 1...10 {
             guard let u = URL(string: base.absoluteString
                     + "/index.php/taxonomy/index/id/\(taxonomieGenres)"
                     + "?page=\(page)&limit=100&sort=identifier&sortDir=asc"),
                   let html = await get(u) else { break }
+            luAuMoinsUnePage = true
             let lot = tousLesGroupes(html, "<a href=\"/index\\.php/[^\"/?]+\" title=\"([^\"]+)\"")
             if lot.isEmpty { break }
             out += lot.map { plain($0) }
             if !html.contains("page=\(page + 1)&limit=100") { break }
         }
+        guard luAuMoinsUnePage else {
+            log("thésaurus des genres ILLISIBLE (page inaccessible) — aucun genre ne sera publié")
+            return nil
+        }
         let uniques = Array(Set(out.filter { !$0.isEmpty })).sorted()
-        genresCache = uniques
+        genresCache = (uniques, Date())
         log("vocabulaire des genres : \(uniques.count) terme(s) lus dans AtoM")
         return uniques
     }
@@ -727,6 +747,7 @@ enum AtomClient {
         // Une date n'est publiée que si la notice n'en portait aucune (elle ne figure alors dans
         // « changes » que dans ce cas). AtoM la range comme un ÉVÉNEMENT de type « Creation » ;
         // les bornes internes ne sont posées que si la date est vraiment en ISO 8601.
+        if let d = values["eventDates"], !d.isEmpty { values["eventDates"] = normaliseDate(d) }
         if let d = values["eventDates"], !d.isEmpty, !dateISOValide(d) {
             // Une date hors format irait s'inscrire telle quelle dans le catalogue, et AtoM
             // l'AJOUTERAIT en plus de l'existante. On préfère ne rien écrire, et le dire.

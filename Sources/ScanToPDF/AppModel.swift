@@ -416,12 +416,23 @@ final class AppModel: ObservableObject {
             let match = await AtomClient.findExisting(base: base, code: code)
             // Les genres sont alignés sur le thésaurus du catalogue AVANT toute comparaison : ce que
             // l'archiviste voit à l'écran est exactement ce qui partira, orthographe d'AtoM comprise.
-            let vocabulaire = await AtomClient.genresExistants(base: base)
-            let tri = AtomClient.alignerGenres(proposed.genres, sur: vocabulaire)
-            proposed.genres = tri.retenus
-            if !tri.ecartes.isEmpty {
-                AtomClient.log("genres écartés (absents du thésaurus, non créés) : "
-                               + tri.ecartes.joined(separator: ", "))
+            let proposesInitiaux = proposed.genres
+            var ecartes: [String] = []
+            var thesaurusIllisible = false
+            if let vocabulaire = await AtomClient.genresExistants(base: base) {
+                let tri = AtomClient.alignerGenres(proposed.genres, sur: vocabulaire)
+                proposed.genres = tri.retenus
+                ecartes = tri.ecartes
+                if !ecartes.isEmpty {
+                    AtomClient.log("genres écartés (absents du thésaurus, non créés) : "
+                                   + ecartes.joined(separator: ", "))
+                }
+            } else {
+                // Thésaurus injoignable : on ne publie aucun genre plutôt que d'en créer à l'aveugle,
+                // mais on ne prétend pas non plus qu'ils sont absents du catalogue — on l'ignore.
+                proposed.genres = []
+                ecartes = proposesInitiaux
+                thesaurusIllisible = true
             }
             // La cote proposée est TOUJOURS l'écriture « _ » : publier migre une ancienne notice.
             proposed.identifier = match.map { m in
@@ -431,7 +442,8 @@ final class AppModel: ObservableObject {
             var p = AtomPublication(code: code, folder: folder, pdf: pdf,
                                     proposed: proposed, existing: match?.record ?? AtomRecord(),
                                     slug: match?.slug, matchedCode: match?.matchedCode ?? code)
-            p.genresEcartes = tri.ecartes
+            p.genresEcartes = ecartes
+            p.thesaurusIllisible = thesaurusIllisible
             p.fields = AtomClient.diff(existing: match?.record, proposed: proposed,
                                        repository: repository)
             await MainActor.run { [weak self] in
