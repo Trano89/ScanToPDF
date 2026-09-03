@@ -1094,9 +1094,72 @@ def _pdf_extent(pdf_path: Path, from_pdf: bool) -> tuple:
         return 0, ""
     fmt = next((n for n, a, b in PAPER_FORMATS if abs(w - a) < 1.0 and abs(h - b) < 1.0), "")
     if not (from_pdf or fmt):
-        return pages, ""
+        return pages, "", 0.0, 0.0
     size = f"{w:.1f} × {h:.1f} cm".replace(".", ",")
-    return pages, f"{size} ({fmt})" if fmt else size
+    return pages, (f"{size} ({fmt})" if fmt else size), w, h
+
+
+def _format_le_plus_proche(w: float, h: float) -> str:
+    """Format normalisé le plus proche des dimensions mesurées. Les documents d'archives sont
+    rognés, pliés, coupés : leur page tombe rarement pile sur un format. Nommer le plus proche
+    situe la pièce, les dimensions exactes étant données juste après."""
+    if w <= 0 or h <= 0:
+        return ""
+    a, b = (w, h) if h >= w else (h, w)          # comparaison en portrait
+    return min(PAPER_FORMATS, key=lambda f: (a - f[1]) ** 2 + (b - f[2]) ** 2)[0]
+
+
+def _serie_nature(project_name: str, logger: logging.Logger) -> str:
+    """Nature du document, lue sur la SÉRIE dont il relève (« Numérique », « Papier », « Livret »…).
+
+    La cote « Db.k.Y1.2023_1 » désigne la pièce ; sa série est « Db.k.Y1 », et c'est la fiche de
+    cette série qui porte la nature dans son champ « Étendue matérielle et support ». On la lit
+    plutôt que de la deviner : le fonds seul sait si une pièce est papier, numérique ou reliée.
+    Lecture publique, sans authentification, et sans conséquence en cas d'échec."""
+    segments = project_name.split(".")
+    if len(segments) < 2:
+        return ""
+    base = str(_CFG.get("atomBaseURL", "")).strip().rstrip("/")
+    if not base.startswith("https://"):
+        return ""
+    slug = "-".join(segments[:-1]).replace("/", "-")
+    try:
+        import urllib.request
+        req = urllib.request.Request(f"{base}/index.php/{slug}",
+                                     headers={"User-Agent": "ScanToPDF"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            page = resp.read().decode("utf-8", errors="replace")
+    except Exception as exc:
+        logger.info(f"Nature de la série « {slug} » non lue ({exc}) — étendue sans mention de nature.")
+        return ""
+    m = re.search(r'<h3[^>]*>\s*Étendue matérielle et support\s*</h3>\s*'
+                  r'<div class="[^"]*col-9 p-2">(.*?)</div>', page, re.S)
+    if not m:
+        logger.info(f"Série « {slug} » : aucune étendue déclarée — étendue sans mention de nature.")
+        return ""
+    nature = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", m.group(1))).strip()
+    logger.info(f"Nature reprise de la série « {slug} » : {nature or '(vide)'}")
+    return nature
+
+
+def _etendue_normalisee(nature: str, pages: int, w: float, h: float) -> str:
+    """Compose l'étendue selon la forme retenue par le service :
+
+        Document papier de 10 pages A4.
+        Dimensions : 19,0 cm × 21,0 cm
+
+    Rien n'est inventé : la nature vient de la série, le nombre de pages et les dimensions sont
+    mesurés. Une composante absente disparaît de la phrase au lieu d'être devinée."""
+    if not pages:
+        return ""
+    nat = f" {nature.strip().lower()}" if nature.strip() else ""
+    fmt = _format_le_plus_proche(w, h)
+    pluriel = "s" if pages > 1 else ""
+    ligne = f"Document{nat} de {pages} page{pluriel}" + (f" {fmt}" if fmt else "") + "."
+    if w > 0 and h > 0:
+        dims = f"{w:.1f} cm × {h:.1f} cm".replace(".", ",")
+        return f"{ligne}\nDimensions : {dims}"
+    return ligne
 
 
 def _isad_sample(text: str, budget: int) -> str:
@@ -1181,10 +1244,9 @@ def _isad_prompt(ocr_text: str, project_name: str, fallback_date: str = "",
         "  N'INVENTE JAMAIS une composante absente : pas de jour pour un « février 2015 », pas de mois "
         "pour une simple année. Aucune date dans le document → « Inconnu ».\n"
         + date_fallback +
-        "ETENDUE: étendue et support (ISAD 3.1.5). Reprends OBLIGATOIREMENT le nombre de pages des "
-        "DONNÉES FACTUELLES, sous la forme « <nature du document> de N pages », suivi du format "
-        "UNIQUEMENT s'il y est fourni (ex. « 1 brochure de 18 pages, 21,0 × 29,7 cm »). Si le format "
-        "est annoncé non mesurable, n'invente aucune dimension.\n"
+        "ETENDUE: étendue et support (ISAD 3.1.5). Reprends le nombre de pages des DONNÉES "
+        "FACTUELLES sous la forme « Document de N pages ». Ce champ est de toute façon recomposé "
+        "ensuite à partir des mesures du fichier : n'y mets aucune dimension et aucune supposition.\n"
         "HISTOIRE: histoire archivistique (ISAD 3.2.3) : origine, producteur, contexte de création. "
         "2 à 4 phrases.\n"
         "PORTEE: portée et contenu (ISAD 3.3.1) : de quoi traite CE document. C'est le champ le plus "
@@ -1583,7 +1645,7 @@ def write_isad_sidecar(final_pdf: Path, ocr_text: str, project_name: str, logger
     if not ocr_text.strip():
         logger.info("Fiche ISAD : aucune couche texte exploitable dans le PDF — fiche non générée.")
         return
-    pages, size = _pdf_extent(final_pdf, from_pdf)
+    pages, size, larg, haut = _pdf_extent(final_pdf, from_pdf)
     facts = {"pages": pages or None, "size": size or None,
              "support": "document PDF numérique" if from_pdf else "numérisation de documents papier"}
     # Signal d'honnêteté : sous ce seuil, l'OCR n'a presque rien rendu (page de titre seule, écriture
@@ -1620,6 +1682,13 @@ def write_isad_sidecar(final_pdf: Path, ocr_text: str, project_name: str, logger
         logger.warning(f"Fiche ISAD : aucune date dans le texte — repli sur les métadonnées du "
                        f"fichier ({fallback_date}), qui peuvent être la date de numérisation.")
     # Filet de sécurité déterministe contre les lieux inventés (cf. _isad_filter_places).
+    # ÉTENDUE : composée à partir de faits — nature de la série, pages et dimensions mesurées —
+    # et non rédigée par le modèle. C'est le seul champ de la fiche dont chaque terme est vérifiable ;
+    # le laisser à la rédaction libre donnait « cahier des charges du Concours Théâtral de 10 pages »,
+    # c'est-à-dire le sujet du document là où l'on attend son support.
+    etendue = _etendue_normalisee(_serie_nature(project_name, logger), pages, larg, haut)
+    if etendue:
+        fields["ETENDUE"] = etendue
     if fields.get("LIEUX"):
         fields["LIEUX"] = _isad_filter_places(fields["LIEUX"], ocr_text, logger)
     # Puis pertinence et plafond, sur les quatre listes.
