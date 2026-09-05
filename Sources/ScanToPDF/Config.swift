@@ -128,6 +128,11 @@ struct AppConfig: Codable, Equatable {
     // notice — et il est aussi écrit dans la notice. Modifiable, car une autre instance AtoM ou un
     // second dépôt demanderaient une autre valeur.
     var atomRepository: String = "Archives FVJC"
+    // Langue dans laquelle l'import écrit les valeurs. Elle doit correspondre à la langue
+    // D'ORIGINE des notices : l'import bascule la session dans cette langue avant d'écrire
+    // (QubitFlatfileImport, setCulture), si bien qu'une langue différente crée une TRADUCTION
+    // au lieu de modifier la notice — et AtoM annonce alors « il existe une version anglaise ».
+    var atomCulture: String = "fr"
     // Application :
     var startAtLogin: Bool = true    // démarrer avec le système (login item)
     var networkEnabled: Bool = true  // découverte réseau + invitation de mise à jour
@@ -186,6 +191,7 @@ struct AppConfig: Codable, Equatable {
         atomBaseURL = d(.atomBaseURL, atomBaseURL)
         atomEmail = d(.atomEmail, atomEmail)
         atomRepository = d(.atomRepository, atomRepository)
+        atomCulture = d(.atomCulture, atomCulture).trimmingCharacters(in: .whitespaces).lowercased()
         exportEnabled = d(.exportEnabled, exportEnabled)
         nasVolumePath = d(.nasVolumePath, nasVolumePath)
         nasMountFrom = d(.nasMountFrom, nasMountFrom)

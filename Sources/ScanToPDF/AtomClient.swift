@@ -712,7 +712,7 @@ enum AtomClient {
 
     /// Publie une notice par import CSV, puis VÉRIFIE par relecture que la notice a bien changé.
     static func publishViaCsv(base: URL, slug: String, record: AtomRecord, pdf: URL,
-                              repository: String,
+                              repository: String, culture: String,
                               changes: [String: String]) async -> Result<Void, AtomError> {
         // La « Cote » affichée par AtoM est la cote de RÉFÉRENCE : pays, dépôt et cotes des parents
         // assemblés (« CH FVJC Zz.z.Z1.2026_1 »). L'appariement de l'import porte sur la cote PROPRE
@@ -726,7 +726,7 @@ enum AtomClient {
         guard !ownIdentifier.isEmpty, !ownTitle.isEmpty else {
             return .failure(.rejected("cote ou titre absent de la notice — appariement impossible"))
         }
-        var values: [String: String] = ["culture": "fr"]
+        var values: [String: String] = ["culture": culture.isEmpty ? "fr" : culture]
         for (k, v) in changes where k != "identifier" { values[k] = v }
         values["identifier"] = ownIdentifier
         // Le TITRE est une clé d'appariement autant qu'une valeur : AtoM retrouve la notice sur
@@ -894,6 +894,14 @@ enum AtomClient {
                                     changes: [String: String]) async -> Result<Void, AtomError> {
         guard let after = await get(base.appendingPathComponent("index.php/" + slug)) else {
             return .failure(.rejected("enregistrement non vérifiable (notice illisible après import)"))
+        }
+        // Langues déclarées par AtoM sur la notice. Une SECONDE langue signifie que l'import a
+        // créé une traduction au lieu de modifier la notice — c'est ce qui fait dire à AtoM
+        // qu'il existe une version anglaise. On le constate ici plutôt que de le déduire.
+        let langues = Set(tousLesGroupes(after, "sf_culture=([a-z]{2})")).sorted()
+        if langues.count > 1 {
+            log("⚠️ la notice existe en \(langues.count) langues (\(langues.joined(separator: ", "))) — "
+                + "la langue d'écriture ne correspond pas à la langue d'origine de la notice")
         }
         let saved = parseRecord(after)
         // Champs de texte : la valeur enregistrée doit être EXACTEMENT celle envoyée.

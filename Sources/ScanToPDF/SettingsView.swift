@@ -336,6 +336,18 @@ struct SettingsView: View {
                         .textFieldStyle(.roundedBorder)
                     TextField("Dépôt d'archives", text: b(\.atomRepository))
                         .textFieldStyle(.roundedBorder)
+                    Picker("Langue d'écriture", selection: b(\.atomCulture)) {
+                        Text("Français (fr)").tag("fr")
+                        Text("Anglais (en)").tag("en")
+                        Text("Allemand (de)").tag("de")
+                        Text("Italien (it)").tag("it")
+                    }
+                    Text("Doit correspondre à la langue D'ORIGINE des notices, pas à la langue du "
+                         + "texte. L'import bascule dans cette langue avant d'écrire : si elle "
+                         + "diffère, il crée une TRADUCTION au lieu de modifier la notice, et AtoM "
+                         + "annonce dès lors qu'il existe une autre version.")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                     Text("Sert à retrouver la notice dans AtoM — l'appariement porte sur la cote, "
                          + "le titre ET le dépôt. Reste modifiable au moment de publier.")
                         .font(.caption).foregroundStyle(.secondary)

@@ -491,6 +491,7 @@ final class AppModel: ObservableObject {
         AtomClient.log("publication de « \(p.code) » vers /\(slug) — champs : \(p.changes.keys.sorted().joined(separator: ", "))")
         switch await AtomClient.publishViaCsv(base: base, slug: slug, record: p.existing,
                                               pdf: p.pdf, repository: p.repository,
+                                              culture: config.atomCulture,
                                               changes: p.changes) {
         case .success:
             AtomClient.log("✅ « \(p.code) » publié et vérifié")
